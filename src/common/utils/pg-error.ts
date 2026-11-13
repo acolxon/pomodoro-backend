@@ -1,6 +1,9 @@
 /** Код PostgreSQL для нарушения уникальности. */
 export const PG_UNIQUE_VIOLATION = '23505';
 
+/** Код PostgreSQL для нарушения CHECK (в том числе из RAISE ... USING ERRCODE = '23514'). */
+export const PG_CHECK_VIOLATION = '23514';
+
 export interface PgErrorInfo {
   code?: string;
   constraint?: string;
