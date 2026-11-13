@@ -1,0 +1,23 @@
+/**
+ * Машинные коды ошибок. Frontend опирается на них, а не на тексты сообщений.
+ * Новые коды добавляются по мере появления модулей.
+ */
+export enum ErrorCode {
+  // Общие
+  VALIDATION_ERROR = 'VALIDATION_ERROR',
+  BAD_REQUEST = 'BAD_REQUEST',
+  UNAUTHORIZED = 'UNAUTHORIZED',
+  FORBIDDEN = 'FORBIDDEN',
+  NOT_FOUND = 'NOT_FOUND',
+  CONFLICT = 'CONFLICT',
+  TOO_MANY_REQUESTS = 'TOO_MANY_REQUESTS',
+  HTTP_ERROR = 'HTTP_ERROR',
+  INTERNAL_ERROR = 'INTERNAL_ERROR',
+  SERVICE_UNAVAILABLE = 'SERVICE_UNAVAILABLE',
+
+  // Auth / Users
+  EMAIL_TAKEN = 'EMAIL_TAKEN',
+  USERNAME_TAKEN = 'USERNAME_TAKEN',
+  INVALID_CREDENTIALS = 'INVALID_CREDENTIALS',
+  USER_NOT_FOUND = 'USER_NOT_FOUND',
+}

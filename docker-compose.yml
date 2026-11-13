@@ -1,0 +1,26 @@
+# Запускать из папки backend/:  docker compose up -d
+# Значения берутся из backend/.env (тот же файл, что использует приложение).
+name: tomato
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tomato-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?Не задан DB_USER в .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Не задан DB_PASSWORD в .env}
+      POSTGRES_DB: ${DB_NAME:?Не задан DB_NAME в .env}
+    ports:
+      # Доступ только с этого компьютера
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - tomato_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  tomato_pgdata:
