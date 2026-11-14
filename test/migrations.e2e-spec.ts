@@ -71,6 +71,14 @@ describe('Миграции и ограничения БД (e2e)', () => {
     expect(settings).toHaveLength(0);
   });
 
+  it('создаёт таблицу общего Pomodoro-таймера', async () => {
+    expect(await tableNames()).toContain('pomodoro_sessions');
+    const rows: Array<{ indexname: string }> = await ds.query(
+      `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'pomodoro_sessions'`,
+    );
+    expect(rows.map((row) => row.indexname)).toContain('idx_pomodoro_running');
+  });
+
   it('создаёт таблицы и индексы Этапа 2 (Rooms)', async () => {
     expect(await tableNames()).toEqual(expect.arrayContaining(['rooms', 'room_members']));
 
