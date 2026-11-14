@@ -49,6 +49,45 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     return { start, at: (milliseconds: number) => clock!.mockReturnValue(start + milliseconds) };
   }
 
+  it('returns the caller’s original focus task even after selection changes and hides it from other users', async () => {
+    const owner = await registerUser(app, 'owner');
+    const other = await registerUser(app, 'other');
+    const first = await taskFor(owner, 'Original task');
+    const room = await roomFor(owner);
+    const session = await pomodoro.start(owner.id, room.id);
+    const path = `/history/sessions/${session.pomodoroSessionId}/my-task`;
+    expect((await http().get(path).set(as(owner)).expect(200)).body).toEqual({
+      participant: true,
+      taskId: first.id,
+      taskTitle: 'Original task',
+    });
+    await http().patch(`/tasks/${first.id}`).set(as(owner)).send({ status: 'todo' }).expect(200);
+    await taskFor(owner, 'Next task');
+    expect((await http().get(path).set(as(owner)).expect(200)).body).toEqual({
+      participant: true,
+      taskId: first.id,
+      taskTitle: 'Original task',
+    });
+    expect((await http().get(path).set(as(other)).expect(200)).body).toEqual({
+      participant: false,
+      taskId: null,
+      taskTitle: null,
+    });
+    await http().delete(`/tasks/${first.id}`).set(as(owner)).expect(204);
+    expect((await http().get(path).set(as(owner)).expect(200)).body).toEqual({
+      participant: true,
+      taskId: null,
+      taskTitle: 'Original task',
+    });
+    await http().post('/rooms/leave').set(as(owner)).expect(200);
+    expect((await http().get(path).set(as(owner)).expect(200)).body).toEqual({
+      participant: false,
+      taskId: null,
+      taskTitle: null,
+    });
+    await http().get(path).expect(401);
+  });
+
   it('validates, isolates and updates personal tasks without changing the original completion time', async () => {
     const alice = await registerUser(app, 'alice');
     const bob = await registerUser(app, 'bob');

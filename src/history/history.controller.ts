@@ -27,6 +27,12 @@ import { HistoryRoomDto } from './dto/history-room.dto';
 export class HistoryController {
   constructor(private readonly history: HistoryService) {}
 
+  @Get('sessions/:id/my-task')
+  @ApiOperation({ summary: 'Личная задача, сохранённая при старте фокуса' })
+  getSessionTask(@CurrentUser() user: AuthUser, @Param('id', uuidPipe) id: string) {
+    return this.history.getSessionTask(user.id, id);
+  }
+
   @Get('rooms')
   @ApiOperation({ summary: 'Комнаты из личной истории для фильтрации' })
   @ApiOkResponse({ type: [HistoryRoomDto] })

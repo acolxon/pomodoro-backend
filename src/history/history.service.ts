@@ -273,6 +273,19 @@ export class HistoryService {
     return record;
   }
 
+  async getSessionTask(userId: string, runId: string) {
+    const participant = await this.history.manager.findOneBy(PomodoroParticipant, {
+      runId,
+      userId,
+      finishedAt: IsNull(),
+    });
+    return {
+      participant: !!participant,
+      taskId: participant?.taskId ?? null,
+      taskTitle: participant?.taskTitle ?? null,
+    };
+  }
+
   async getRooms(userId: string): Promise<HistoryRoomDto[]> {
     return this.history
       .createQueryBuilder('history')
