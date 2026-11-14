@@ -4,13 +4,15 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager, IsNull } from 'typeorm';
 import { FocusHistoryStatus } from '../history/entities/focus-history.entity';
 import { PomodoroRun } from '../history/entities/pomodoro-run.entity';
 import { HistoryService } from '../history/history.service';
 import { RoomMember } from '../rooms/entities/room-member.entity';
-import { Room } from '../rooms/entities/room.entity';
+import { Room, RoomStatus } from '../rooms/entities/room.entity';
 import { roomErrors } from '../rooms/rooms.errors';
 import { PomodoroPhase, PomodoroSession, PomodoroStatus } from './entities/pomodoro-session.entity';
 import { PomodoroStateDto } from './dto/pomodoro-state.dto';
@@ -28,12 +30,16 @@ type SessionChange = (
 export class PomodoroService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PomodoroService.name);
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly maxPauseMilliseconds: number;
   private broadcaster?: (roomId: string, state: PomodoroStateDto) => void;
 
   constructor(
     private readonly dataSource: DataSource,
     private readonly history: HistoryService,
-  ) {}
+    @Optional() config?: ConfigService,
+  ) {
+    this.maxPauseMilliseconds = (config?.get<number>('POMODORO_MAX_PAUSE_SECONDS') ?? 900) * 1000;
+  }
 
   setBroadcaster(callback: (roomId: string, state: PomodoroStateDto) => void): void {
     this.broadcaster = callback;
@@ -42,9 +48,9 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     try {
       const running = await this.dataSource.getRepository(PomodoroSession).find({
-        where: { status: PomodoroStatus.Running },
+        where: [{ status: PomodoroStatus.Running }, { status: PomodoroStatus.Paused }],
       });
-      for (const session of running) this.schedule(session.roomId, session.endsAt);
+      for (const session of running) this.scheduleSession(session);
     } catch (error) {
       const code =
         typeof error === 'object' && error !== null && 'code' in error
@@ -62,6 +68,17 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
 
   getState(userId: string, roomId: string): Promise<PomodoroStateDto> {
     return this.mutate(roomId, userId, false, () => {});
+  }
+
+  /** Read under the room lock already held by the snapshot transaction.
+   * getState initializes/advances the timer before this read; no nested transaction.
+   */
+  async readState(manager: EntityManager, roomId: string): Promise<PomodoroStateDto> {
+    return this.toState(await manager.findOneByOrFail(PomodoroSession, { roomId }));
+  }
+
+  stopRoom(roomId: string): void {
+    this.clearSchedule(roomId);
   }
 
   start(userId: string, roomId: string): Promise<PomodoroStateDto> {
@@ -128,6 +145,7 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
         lock: { mode: 'pessimistic_write' },
       });
       if (!room) throw roomErrors.notFound();
+      if (room.status === RoomStatus.Closed) throw roomErrors.closed();
       if (userId !== null) {
         const member = await manager.findOneBy(RoomMember, { roomId, userId, leftAt: IsNull() });
         if (!member) throw roomErrors.notMemberOfRoom();
@@ -148,8 +166,7 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
       await change(row, manager, now);
       return { session: await manager.save(row), advanced };
     });
-    if (session.status === PomodoroStatus.Running) this.schedule(roomId, session.endsAt);
-    else this.clearSchedule(roomId);
+    this.scheduleSession(session);
     const state = this.toState(session);
     if (advanced) this.broadcaster?.(roomId, state);
     return state;
@@ -196,6 +213,20 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
     row: PomodoroSession,
     now: Date,
   ): Promise<boolean> {
+    if (row.status === PomodoroStatus.Paused && row.pausedAt) {
+      const deadline = new Date(row.pausedAt.getTime() + this.maxPauseMilliseconds);
+      if (deadline > now) return false;
+      if (row.phase === PomodoroPhase.Focus && row.focusRunId) {
+        await this.history.finishFocus(
+          manager,
+          row.focusRunId,
+          FocusHistoryStatus.Cancelled,
+          deadline,
+        );
+      }
+      this.reset(row);
+      return true;
+    }
     if (row.status !== PomodoroStatus.Running || !row.endsAt || row.endsAt > now) return false;
     if (row.phase === PomodoroPhase.Focus) {
       await this.recordFocusInterval(manager, row, row.endsAt);
@@ -211,6 +242,13 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
       this.reset(row);
     }
     return true;
+  }
+
+  private scheduleSession(row: PomodoroSession): void {
+    if (row.status === PomodoroStatus.Running) this.schedule(row.roomId, row.endsAt);
+    else if (row.status === PomodoroStatus.Paused && row.pausedAt) {
+      this.schedule(row.roomId, new Date(row.pausedAt.getTime() + this.maxPauseMilliseconds));
+    } else this.clearSchedule(row.roomId);
   }
 
   private schedule(roomId: string, endsAt: Date | null): void {

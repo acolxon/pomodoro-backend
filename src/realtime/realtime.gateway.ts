@@ -12,17 +12,23 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { UsersService } from '../users/users.service';
-import { RoomsService } from '../rooms/rooms.service';
+import { RoomChange, RoomsService } from '../rooms/rooms.service';
+import { RoomDto, RoomMemberDto } from '../rooms/dto/room.dto';
 import { PomodoroService } from '../pomodoro/pomodoro.service';
 import { PomodoroStateDto } from '../pomodoro/dto/pomodoro-state.dto';
 import { AuthUser, JwtPayload } from '../auth/types/auth-user';
+import { toErrorBody } from '../common/filters/all-exceptions.filter';
+import { ErrorCode } from '../common/errors/error-codes';
 
 interface AuthenticatedSocket extends Socket {
   data: { user?: AuthUser };
 }
-interface RoomPayload { roomId: string; }
+interface RoomPayload {
+  roomId: string;
+}
 
-@WebSocketGateway({ cors: { origin: true, credentials: true } })
+// The configured adapter applies CORS and WebSocket Origin validation via ConfigService.
+@WebSocketGateway()
 export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server!: Server;
   private readonly logger = new Logger(RealtimeGateway.name);
@@ -34,6 +40,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     private readonly pomodoro: PomodoroService,
   ) {
     this.pomodoro.setBroadcaster((roomId, state) => this.broadcastState(roomId, state));
+    this.rooms.setChangeListener((change) => this.roomChanged(change));
   }
 
   async handleConnection(client: AuthenticatedSocket): Promise<void> {
@@ -45,9 +52,13 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
       const user = await this.users.findById(payload.sub);
       if (!user) throw new Error('User no longer exists');
       client.data.user = { id: user.id, username: user.username };
+      await client.join(this.userChannel(user.id));
       client.emit('realtime:ready', { userId: user.id });
     } catch {
-      client.emit('realtime:error', { code: 'UNAUTHORIZED', message: 'Недействительный JWT' });
+      client.emit('realtime:error', {
+        code: ErrorCode.UNAUTHORIZED,
+        message: 'Недействительный JWT',
+      });
       client.disconnect(true);
     }
   }
@@ -58,28 +69,50 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   @SubscribeMessage('room:join')
   async joinRoom(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: RoomPayload) {
-    const user = this.requireUser(client);
-    this.validateRoomPayload(body);
+    let channel: string | undefined;
     try {
-      const room = await this.rooms.getRoom(user.id, body.roomId);
-      const channel = this.channel(body.roomId);
-      await client.join(channel);
-      const members = await this.rooms.getMembers(user.id, body.roomId);
-      const pomodoro = await this.pomodoro.getState(user.id, body.roomId);
-      const snapshot = { room, members, pomodoro, serverTime: new Date() };
-      client.emit('room:snapshot', snapshot);
+      const user = this.requireUser(client);
+      this.validateRoomPayload(body);
+      channel = this.channel(body.roomId);
+      await this.rooms.withActiveMembership(user.id, body.roomId, () => client.join(channel!));
+      // Initialize/advance before taking the final snapshot lock. Calling getState
+      // inside that transaction would deadlock on its own room lock.
+      await this.pomodoro.getState(user.id, body.roomId);
+      let snapshot!: {
+        room: RoomDto;
+        members: RoomMemberDto[];
+        pomodoro: PomodoroStateDto;
+        serverTime: Date;
+      };
+      await this.rooms.withActiveMembership(user.id, body.roomId, async (manager) => {
+        const room = await this.rooms.getRoom(user.id, body.roomId, manager);
+        const members = await this.rooms.getMembers(user.id, body.roomId, manager);
+        const pomodoro = await this.pomodoro.readState(manager, body.roomId);
+        snapshot = { room, members, pomodoro, serverTime: new Date() };
+        // All room writers take this lock: metadata and timer cannot become stale
+        // before the direct emission, and a departed user cannot receive it.
+        client.emit('room:snapshot', snapshot);
+      });
       return snapshot;
     } catch (error) {
-      throw new WsException(this.errorMessage(error));
+      if (channel) await client.leave(channel);
+      throw this.socketException(error);
     }
   }
 
   @SubscribeMessage('room:leave')
-  async leaveRoom(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() body: RoomPayload) {
-    this.requireUser(client);
-    this.validateRoomPayload(body);
-    await client.leave(this.channel(body.roomId));
-    return { roomId: body.roomId, left: true };
+  async leaveRoom(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() body: RoomPayload,
+  ) {
+    try {
+      this.requireUser(client);
+      this.validateRoomPayload(body);
+      await client.leave(this.channel(body.roomId));
+      return { roomId: body.roomId, left: true };
+    } catch (error) {
+      throw this.socketException(error);
+    }
   }
 
   @SubscribeMessage('pomodoro:start')
@@ -107,18 +140,52 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     body: RoomPayload,
     command: (userId: string, roomId: string) => Promise<PomodoroStateDto>,
   ): Promise<PomodoroStateDto> {
-    const user = this.requireUser(client);
-    this.validateRoomPayload(body);
-    if (!client.rooms.has(this.channel(body.roomId))) {
-      throw new WsException('Сначала подключитесь к комнате через room:join');
-    }
     try {
+      const user = this.requireUser(client);
+      this.validateRoomPayload(body);
+      if (!client.rooms.has(this.channel(body.roomId))) {
+        throw new WsException({
+          code: ErrorCode.NOT_IN_ROOM,
+          message: 'Сначала подключитесь к комнате через room:join',
+        });
+      }
       const state = await command(user.id, body.roomId);
       this.broadcastState(body.roomId, state);
       return state;
     } catch (error) {
-      throw new WsException(this.errorMessage(error));
+      throw this.socketException(error);
     }
+  }
+
+  private async roomChanged(change: RoomChange): Promise<void> {
+    if (change.roomClosed) this.pomodoro.stopRoom(change.roomId);
+    if (!this.server) return;
+    const channel = this.channel(change.roomId);
+    if (change.kind === 'left') {
+      if (change.roomClosed) {
+        const sockets = await this.server.in(channel).fetchSockets();
+        const users = new Set<string>([change.userId]);
+        sockets.forEach((socket) => {
+          if (socket.data.user?.id) users.add(socket.data.user.id);
+        });
+        this.server.in(channel).socketsLeave(channel);
+        for (const userId of users)
+          this.server
+            .to(this.userChannel(userId))
+            .emit('room:removed', { roomId: change.roomId, reason: 'closed' });
+      } else {
+        this.server.in(this.userChannel(change.userId)).socketsLeave(channel);
+        this.server
+          .to(this.userChannel(change.userId))
+          .emit('room:removed', { roomId: change.roomId, reason: 'left' });
+        this.server.to(channel).emit('room:updated', { roomId: change.roomId });
+      }
+      return;
+    }
+    let targets = this.server.to(channel);
+    if (change.kind === 'created' || change.kind === 'joined')
+      targets = targets.to(this.userChannel(change.userId));
+    targets.emit('room:updated', { roomId: change.roomId });
   }
 
   private broadcastState(roomId: string, state: PomodoroStateDto): void {
@@ -127,27 +194,42 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   private extractToken(client: Socket): string | null {
     const authToken = client.handshake.auth?.token;
-    if (typeof authToken === 'string' && authToken.length > 0) return authToken.replace(/^Bearer\s+/i, '');
+    if (typeof authToken === 'string' && authToken.length > 0)
+      return authToken.replace(/^Bearer\s+/i, '');
     const header = client.handshake.headers.authorization;
     if (typeof header === 'string' && header.startsWith('Bearer ')) return header.slice(7);
     return null;
   }
 
   private requireUser(client: AuthenticatedSocket): AuthUser {
-    if (!client.data.user) throw new WsException('Необходима авторизация');
+    if (!client.data.user)
+      throw new WsException({ code: ErrorCode.UNAUTHORIZED, message: 'Необходима авторизация' });
     return client.data.user;
   }
 
   private validateRoomPayload(body: RoomPayload): void {
-    if (!body || typeof body.roomId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.roomId)) {
-      throw new WsException('Некорректный roomId');
+    if (
+      !body ||
+      typeof body.roomId !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        body.roomId,
+      )
+    ) {
+      throw new WsException({ code: ErrorCode.VALIDATION_ERROR, message: 'Некорректный roomId' });
     }
   }
 
-  private channel(roomId: string): string { return `room:${roomId}`; }
+  private channel(roomId: string): string {
+    return `room:${roomId}`;
+  }
+  private userChannel(userId: string): string {
+    return `user:${userId}`;
+  }
 
-  private errorMessage(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    return 'Не удалось выполнить операцию';
+  private socketException(error: unknown): WsException {
+    if (error instanceof WsException) return error;
+    const { code, message } = toErrorBody(error);
+    if (code === ErrorCode.INTERNAL_ERROR) this.logger.error('Realtime command failed', error);
+    return new WsException({ code, message });
   }
 }

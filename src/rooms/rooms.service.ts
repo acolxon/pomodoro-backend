@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager, IsNull } from 'typeorm';
 import { ROOM_DEFAULT_MAX_MEMBERS, CreateRoomDto } from './dto/create-room.dto';
 import { LeaveRoomResultDto, RoomDto, RoomMemberDto } from './dto/room.dto';
@@ -8,6 +8,14 @@ import { generateInviteCode, isValidInviteCode, normalizeInviteCode } from './in
 import { isInviteCodeCollision, mapRoomDbError, roomErrors } from './rooms.errors';
 import { toRoomDto, toRoomMemberDto } from './rooms.mapper';
 import { HistoryService } from '../history/history.service';
+
+/** Published only after the membership transaction commits. */
+export interface RoomChange {
+  roomId: string;
+  userId: string;
+  kind: 'created' | 'joined' | 'left' | 'owner-changed';
+  roomClosed?: boolean;
+}
 
 /** Сколько раз пробуем создать комнату при (крайне маловероятной) коллизии invite_code. */
 const INVITE_CODE_ATTEMPTS = 5;
@@ -24,6 +32,23 @@ const INVITE_CODE_ATTEMPTS = 5;
  */
 @Injectable()
 export class RoomsService {
+  private readonly logger = new Logger(RoomsService.name);
+  private changeListener?: (change: RoomChange) => void | Promise<void>;
+
+  setChangeListener(listener: (change: RoomChange) => void | Promise<void>): void {
+    this.changeListener = listener;
+  }
+
+  private async publishChange(change: RoomChange): Promise<void> {
+    try {
+      await this.changeListener?.(change);
+    } catch (error) {
+      // The database has committed: a delivery failure must not turn a successful
+      // mutation into a failed HTTP response. Reconnect always reads a fresh snapshot.
+      this.logger.error(`Failed to publish room update for ${change.roomId}`, error);
+    }
+  }
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly history: HistoryService,
@@ -33,7 +58,7 @@ export class RoomsService {
   async createRoom(userId: string, dto: CreateRoomDto): Promise<RoomDto> {
     for (let attempt = 1; attempt <= INVITE_CODE_ATTEMPTS; attempt += 1) {
       try {
-        return await this.dataSource.transaction(async (manager) => {
+        const created = await this.dataSource.transaction(async (manager) => {
           const room = await manager.save(
             manager.create(Room, {
               ownerId: userId,
@@ -50,6 +75,8 @@ export class RoomsService {
           });
           return toRoomDto(room, 1);
         });
+        await this.publishChange({ roomId: created.id, userId, kind: 'created' });
+        return created;
       } catch (error) {
         if (isInviteCodeCollision(error) && attempt < INVITE_CODE_ATTEMPTS) {
           continue;
@@ -69,7 +96,7 @@ export class RoomsService {
     }
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      const joined = await this.dataSource.transaction(async (manager) => {
         const room = await manager
           .createQueryBuilder(Room, 'r')
           .setLock('pessimistic_write')
@@ -96,6 +123,8 @@ export class RoomsService {
         });
         return toRoomDto(room, activeCount + 1);
       });
+      await this.publishChange({ roomId: joined.id, userId, kind: 'joined' });
+      return joined;
     } catch (error) {
       throw mapRoomDbError(error) ?? error;
     }
@@ -112,7 +141,7 @@ export class RoomsService {
     }
 
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      const result = await this.dataSource.transaction(async (manager) => {
         const room = await manager
           .createQueryBuilder(Room, 'r')
           .setLock('pessimistic_write')
@@ -158,6 +187,13 @@ export class RoomsService {
         await manager.update(Room, { id: room.id }, { ownerId: successor.userId });
         return { roomId: room.id, roomClosed: false, newOwnerId: successor.userId };
       });
+      await this.publishChange({
+        roomId: result.roomId,
+        userId,
+        kind: 'left',
+        roomClosed: result.roomClosed,
+      });
+      return result;
     } catch (error) {
       throw mapRoomDbError(error) ?? error;
     }
@@ -178,15 +214,21 @@ export class RoomsService {
   }
 
   /** Информация о комнате (включая invite_code) — только для её активных участников. */
-  async getRoom(userId: string, roomId: string): Promise<RoomDto> {
-    const manager = this.dataSource.manager;
+  async getRoom(
+    userId: string,
+    roomId: string,
+    manager = this.dataSource.manager,
+  ): Promise<RoomDto> {
     const room = await this.getRoomForMember(manager, userId, roomId);
     return toRoomDto(room, await this.countActiveMembers(manager, room.id));
   }
 
   /** Активные участники комнаты в порядке вступления. */
-  async getMembers(userId: string, roomId: string): Promise<RoomMemberDto[]> {
-    const manager = this.dataSource.manager;
+  async getMembers(
+    userId: string,
+    roomId: string,
+    manager = this.dataSource.manager,
+  ): Promise<RoomMemberDto[]> {
     await this.getRoomForMember(manager, userId, roomId);
     const members = await manager.find(RoomMember, {
       where: { roomId, leftAt: IsNull() },
@@ -199,7 +241,7 @@ export class RoomsService {
   /** Передача прав владельца другому активному участнику. Доступна только владельцу. */
   async transferOwnership(userId: string, roomId: string, newOwnerId: string): Promise<RoomDto> {
     try {
-      return await this.dataSource.transaction(async (manager) => {
+      const updated = await this.dataSource.transaction(async (manager) => {
         const room = await manager
           .createQueryBuilder(Room, 'r')
           .setLock('pessimistic_write')
@@ -240,9 +282,32 @@ export class RoomsService {
         const updated = await manager.findOneByOrFail(Room, { id: roomId });
         return toRoomDto(updated, await this.countActiveMembers(manager, roomId));
       });
+      await this.publishChange({ roomId, userId, kind: 'owner-changed' });
+      return updated;
     } catch (error) {
       throw mapRoomDbError(error) ?? error;
     }
+  }
+
+  /** Serialize a socket subscription with HTTP departures on the same room lock.
+   * The callback must not start another database transaction.
+   */
+  async withActiveMembership(
+    userId: string,
+    roomId: string,
+    subscribe: (manager: EntityManager) => void | Promise<void>,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const room = await manager.findOne(Room, {
+        where: { id: roomId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!room) throw roomErrors.notFound();
+      if (room.status === RoomStatus.Closed) throw roomErrors.closed();
+      const membership = await manager.findOneBy(RoomMember, { roomId, userId, leftAt: IsNull() });
+      if (!membership) throw roomErrors.notMemberOfRoom();
+      await subscribe(manager);
+    });
   }
 
   // ---------------------------------------------------------------------------

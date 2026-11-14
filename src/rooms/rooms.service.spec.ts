@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { AppException } from '../common/errors/app.exception';
 import { ErrorCode } from '../common/errors/error-codes';
@@ -173,6 +174,54 @@ describe('RoomsService (unit)', () => {
         const error = await errorOf(call());
         expect(codeOf(error)).toBe(ErrorCode.NOT_IN_ROOM);
         expect((error as AppException).getStatus()).toBe(403);
+      }
+    });
+  });
+
+  describe('post-commit membership notifications', () => {
+    it('publishes creation only after the database transaction has resolved', async () => {
+      const { service, transaction } = setup();
+      let commit!: (value: RoomDto) => void;
+      transaction.mockImplementation(
+        () =>
+          new Promise<RoomDto>((resolve) => {
+            commit = resolve;
+          }),
+      );
+      const listener = jest.fn();
+      service.setChangeListener(listener);
+      const pending = service.createRoom(USER_ID, { name: 'Focus' });
+      expect(listener).not.toHaveBeenCalled();
+      commit(roomDto);
+      await pending;
+      expect(listener).toHaveBeenCalledWith({
+        roomId: roomDto.id,
+        userId: USER_ID,
+        kind: 'created',
+      });
+    });
+
+    it('does not publish a mutation that was rolled back', async () => {
+      const { service, transaction } = setup();
+      const listener = jest.fn();
+      service.setChangeListener(listener);
+      transaction.mockRejectedValue(new Error('transaction rolled back'));
+      await expect(service.createRoom(USER_ID, { name: 'Focus' })).rejects.toThrow(
+        'transaction rolled back',
+      );
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('does not report failure or retry a committed mutation if event delivery fails', async () => {
+      const { service, transaction } = setup();
+      transaction.mockResolvedValue(roomDto);
+      service.setChangeListener(jest.fn().mockRejectedValue(new Error('adapter unavailable')));
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => {});
+      try {
+        await expect(service.createRoom(USER_ID, { name: 'Focus' })).resolves.toEqual(roomDto);
+        expect(transaction).toHaveBeenCalledTimes(1);
+      } finally {
+        logged.mockRestore();
       }
     });
   });

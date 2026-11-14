@@ -30,6 +30,11 @@ export class EnvironmentVariables {
   @IsString()
   CORS_ORIGINS: string = 'http://localhost:5173';
 
+  @IsInt()
+  @Min(1)
+  @Max(86400)
+  POMODORO_MAX_PAUSE_SECONDS: number = 900;
+
   @IsIn(['true', 'false'])
   SWAGGER_ENABLED: string = 'true';
 

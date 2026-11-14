@@ -16,6 +16,7 @@ describe('validateEnv', () => {
     expect(env.DB_PORT).toBe(5432);
     expect(env.JWT_EXPIRES_IN_SECONDS).toBe(604800);
     expect(env.SWAGGER_ENABLED).toBe('true');
+    expect(env.POMODORO_MAX_PAUSE_SECONDS).toBe(900);
   });
 
   it('преобразует числовые строки в числа', () => {
@@ -45,5 +46,17 @@ describe('validateEnv', () => {
         JWT_SECRET: 'change_me_to_a_long_random_string_at_least_32_chars',
       }),
     ).toThrow(/JWT_SECRET/);
+  });
+
+  it('converts and validates the pause timeout', () => {
+    expect(
+      validateEnv({ ...base, POMODORO_MAX_PAUSE_SECONDS: '120' }).POMODORO_MAX_PAUSE_SECONDS,
+    ).toBe(120);
+  });
+
+  it.each(['0', '-1', '0.5', 'NaN'])('rejects an invalid pause timeout: %s', (value) => {
+    expect(() => validateEnv({ ...base, POMODORO_MAX_PAUSE_SECONDS: value })).toThrow(
+      /POMODORO_MAX_PAUSE_SECONDS/,
+    );
   });
 });

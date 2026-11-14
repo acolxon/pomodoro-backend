@@ -1,4 +1,6 @@
 import { DataSource, EntityManager } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { RoomStatus } from '../rooms/entities/room.entity';
 import { HistoryService } from '../history/history.service';
 import { FocusHistoryStatus } from '../history/entities/focus-history.entity';
 import { Room } from '../rooms/entities/room.entity';
@@ -10,6 +12,7 @@ describe('Pomodoro lifecycle and history', () => {
   let service: PomodoroService;
   let row: PomodoroSession;
   let manager: EntityManager;
+  let dataSource: DataSource;
   let focusedMilliseconds: number;
   let history: { beginFocus: jest.Mock; recordInterval: jest.Mock; finishFocus: jest.Mock };
 
@@ -38,7 +41,7 @@ describe('Pomodoro lifecycle and history', () => {
     };
     manager = {
       findOne: jest.fn(async (entity: unknown) =>
-        entity === Room ? { id: 'room', ownerId: 'owner' } : row,
+        entity === Room ? { id: 'room', ownerId: 'owner', status: RoomStatus.Open } : row,
       ),
       findOneBy: jest.fn().mockResolvedValue({ userId: 'owner' }),
       findOneOrFail: jest.fn().mockImplementation(async () => row),
@@ -48,7 +51,7 @@ describe('Pomodoro lifecycle and history', () => {
       query: jest.fn().mockResolvedValue([]),
       save: jest.fn().mockImplementation(async (value: unknown) => value),
     } as unknown as EntityManager;
-    const dataSource = {
+    dataSource = {
       transaction: jest.fn(async (action: (em: EntityManager) => unknown) => action(manager)),
       getRepository: jest.fn().mockReturnValue({ find: jest.fn(async () => [row]) }),
     } as unknown as DataSource;
@@ -133,5 +136,122 @@ describe('Pomodoro lifecycle and history', () => {
     await expect(service.start('former-member', 'room')).rejects.toThrow('участником');
     expect(manager.findOneOrFail).not.toHaveBeenCalled();
     expect(history.beginFocus).not.toHaveBeenCalled();
+  });
+
+  it('automatically cancels a paused Focus at the configured deadline without counting pause time', async () => {
+    const broadcast = jest.fn();
+    service.setBroadcaster(broadcast);
+    await service.start('owner', 'room');
+    await jest.advanceTimersByTimeAsync(30_000);
+    await service.pause('owner', 'room');
+    await jest.advanceTimersByTimeAsync(900_000);
+    expect(row.status).toBe(PomodoroStatus.Idle);
+    expect(focusedMilliseconds).toBe(30_000);
+    expect(history.finishFocus).toHaveBeenCalledTimes(1);
+    expect(history.finishFocus).toHaveBeenCalledWith(
+      manager,
+      'run-1',
+      FocusHistoryStatus.Cancelled,
+      new Date(base.getTime() + 930_000),
+    );
+    expect(broadcast).toHaveBeenCalledWith(
+      'room',
+      expect.objectContaining({ status: 'idle', phase: null }),
+    );
+    await service.cancel('owner', 'room');
+    expect(history.finishFocus).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores a paused timer after restart and retains the original pause deadline', async () => {
+    await service.start('owner', 'room');
+    await jest.advanceTimersByTimeAsync(30_000);
+    await service.pause('owner', 'room');
+    service.onModuleDestroy();
+    jest.setSystemTime(base.getTime() + 300_000);
+    await service.onModuleInit();
+    await jest.advanceTimersByTimeAsync(629_999);
+    expect(row.status).toBe(PomodoroStatus.Paused);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(row.status).toBe(PomodoroStatus.Idle);
+    expect(history.finishFocus).toHaveBeenCalledWith(
+      manager,
+      'run-1',
+      FocusHistoryStatus.Cancelled,
+      new Date(base.getTime() + 930_000),
+    );
+  });
+
+  it('cancels overdue paused runs immediately after restart using the deadline rather than recovery time', async () => {
+    await service.start('owner', 'room');
+    await jest.advanceTimersByTimeAsync(30_000);
+    await service.pause('owner', 'room');
+    service.onModuleDestroy();
+    jest.setSystemTime(base.getTime() + 1_000_000);
+    await service.onModuleInit();
+    await jest.advanceTimersByTimeAsync(0);
+    expect(row.status).toBe(PomodoroStatus.Idle);
+    expect(history.finishFocus).toHaveBeenCalledWith(
+      manager,
+      'run-1',
+      FocusHistoryStatus.Cancelled,
+      new Date(base.getTime() + 930_000),
+    );
+  });
+
+  it('cannot resume a Focus at or after its pause deadline', async () => {
+    await service.start('owner', 'room');
+    jest.setSystemTime(base.getTime() + 30_000);
+    await service.pause('owner', 'room');
+    jest.setSystemTime(base.getTime() + 930_000);
+    const resumed = await service.resume('owner', 'room');
+    expect(resumed.status).toBe(PomodoroStatus.Idle);
+    expect(history.finishFocus).toHaveBeenCalledTimes(1);
+    expect(history.beginFocus).toHaveBeenCalledTimes(1);
+  });
+
+  it('expires a paused Break without duplicating or cancelling the completed Focus result', async () => {
+    await service.start('owner', 'room');
+    await jest.advanceTimersByTimeAsync(1_500_000);
+    await service.pause('owner', 'room');
+    await jest.advanceTimersByTimeAsync(900_000);
+    expect(row.status).toBe(PomodoroStatus.Idle);
+    expect(history.finishFocus).toHaveBeenCalledTimes(1);
+    expect(history.finishFocus.mock.calls[0][2]).toBe(FocusHistoryStatus.Completed);
+  });
+
+  it('uses the server configuration for pause expiry', async () => {
+    service.onModuleDestroy();
+    service = new PomodoroService(
+      dataSource,
+      history as unknown as HistoryService,
+      new ConfigService({ POMODORO_MAX_PAUSE_SECONDS: 10 }),
+    );
+    await service.start('owner', 'room');
+    await service.pause('owner', 'room');
+    await jest.advanceTimersByTimeAsync(9_999);
+    expect(row.status).toBe(PomodoroStatus.Paused);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(row.status).toBe(PomodoroStatus.Idle);
+  });
+
+  it('stops a scheduled pause expiry when the room lifecycle cancels its timer', async () => {
+    await service.start('owner', 'room');
+    await service.pause('owner', 'room');
+    service.stopRoom('room');
+    await jest.advanceTimersByTimeAsync(900_000);
+    expect(history.finishFocus).not.toHaveBeenCalled();
+  });
+
+  it('rejects timer operations on a closed room before creating or modifying a run', async () => {
+    (manager.findOne as jest.Mock).mockResolvedValue({
+      id: 'room',
+      ownerId: 'owner',
+      status: RoomStatus.Closed,
+    });
+    await expect(service.start('owner', 'room')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'ROOM_CLOSED' }),
+    });
+    expect(history.beginFocus).not.toHaveBeenCalled();
+    expect(manager.save).not.toHaveBeenCalled();
   });
 });
