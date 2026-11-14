@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, IsNull, Repository, SelectQueryBuilder } from 'typeorm';
 import { RoomMember } from '../rooms/entities/room-member.entity';
+import { Room } from '../rooms/entities/room.entity';
+import { HistoryRoomDto } from './dto/history-room.dto';
 import { Task, TaskStatus } from '../tasks/entities/task.entity';
 import { HistoryQueryDto } from './dto/history-query.dto';
 import { HistoryStatsQueryDto } from './dto/history-stats-query.dto';
@@ -28,9 +30,11 @@ export class HistoryService {
     startedAt: Date,
     plannedDurationSeconds: number,
   ): Promise<string> {
+    const room = await manager.findOneByOrFail(Room, { id: roomId });
     const run = await manager.save(
       manager.create(PomodoroRun, {
         roomId,
+        roomName: room.name,
         startedAt,
         plannedDurationSeconds,
         focusedMilliseconds: 0,
@@ -124,6 +128,7 @@ export class HistoryService {
             taskId: participant.taskId,
             taskTitle: participant.taskTitle,
             roomId: run.roomId,
+            roomName: run.roomName,
             pomodoroSessionId: run.id,
             status,
             plannedDurationSeconds: run.plannedDurationSeconds,
@@ -187,6 +192,7 @@ export class HistoryService {
         taskId: participant.taskId,
         taskTitle: participant.taskTitle,
         roomId,
+        roomName: run.roomName,
         pomodoroSessionId: runId,
         status:
           timer.endsAt && timer.endsAt <= leftAt
@@ -262,6 +268,20 @@ export class HistoryService {
     return record;
   }
 
+  async getRooms(userId: string): Promise<HistoryRoomDto[]> {
+    return this.history
+      .createQueryBuilder('history')
+      .select('history.roomId', 'id')
+      .addSelect('history.roomName', 'name')
+      .distinctOn(['history.roomId'])
+      .where('history.userId = :userId', { userId })
+      .andWhere('history.roomId IS NOT NULL')
+      .orderBy('history.roomId', 'ASC')
+      .addOrderBy('history.startedAt', 'DESC')
+      .addOrderBy('history.id', 'DESC')
+      .getRawMany<HistoryRoomDto>();
+  }
+
   async getStats(userId: string, query: HistoryStatsQueryDto): Promise<HistoryStatsDto> {
     const row = await this.filteredQuery(userId, query)
       .select('COUNT(*)', 'totalSessions')
@@ -296,6 +316,7 @@ export class HistoryService {
       .createQueryBuilder('history')
       .where('history.userId = :userId', { userId });
     if (query.status) builder.andWhere('history.status = :status', { status: query.status });
+    if (query.roomId) builder.andWhere('history.roomId = :roomId', { roomId: query.roomId });
     if (query.from) builder.andWhere('history.startedAt >= :from', { from: query.from });
     if (query.to) builder.andWhere('history.startedAt < :to', { to: query.to });
     return builder;

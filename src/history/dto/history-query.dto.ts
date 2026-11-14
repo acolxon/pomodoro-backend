@@ -1,9 +1,14 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsDateString, IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsDateString, IsEnum, IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 import { FocusHistoryStatus } from '../entities/focus-history.entity';
 
 export class HistoryQueryDto {
+  @ApiPropertyOptional({ format: 'uuid', description: 'Комната, в которой проходила сессия' })
+  @IsOptional()
+  @IsUUID()
+  roomId?: string;
+
   @ApiPropertyOptional({ enum: FocusHistoryStatus })
   @IsOptional()
   @IsEnum(FocusHistoryStatus)

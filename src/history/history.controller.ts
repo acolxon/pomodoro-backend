@@ -17,6 +17,7 @@ import { HistoryStatsDto } from './dto/history-stats.dto';
 import { HistoryPageDto } from './dto/history-page.dto';
 import { FocusHistory } from './entities/focus-history.entity';
 import { HistoryService } from './history.service';
+import { HistoryRoomDto } from './dto/history-room.dto';
 
 @ApiTags('history')
 @ApiBearerAuth('access-token')
@@ -25,6 +26,13 @@ import { HistoryService } from './history.service';
 @Controller('history')
 export class HistoryController {
   constructor(private readonly history: HistoryService) {}
+
+  @Get('rooms')
+  @ApiOperation({ summary: 'Комнаты из личной истории для фильтрации' })
+  @ApiOkResponse({ type: [HistoryRoomDto] })
+  getRooms(@CurrentUser() user: AuthUser): Promise<HistoryRoomDto[]> {
+    return this.history.getRooms(user.id);
+  }
 
   @Get('stats')
   @ApiOperation({ summary: 'Статистика личных фокус-сессий за период' })

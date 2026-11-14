@@ -29,6 +29,10 @@ export class FocusHistory {
   @Column({ name: 'room_id', type: 'uuid', nullable: true })
   roomId!: string | null;
 
+  @ApiPropertyOptional({ nullable: true, description: 'Название комнаты на момент запуска' })
+  @Column({ name: 'room_name', type: 'varchar', length: 50, nullable: true })
+  roomName!: string | null;
+
   /** Постоянный ID запуска Focus, общий для его участников. */
   @ApiProperty({ format: 'uuid' })
   @Column({ name: 'pomodoro_session_id', type: 'uuid' })

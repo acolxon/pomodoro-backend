@@ -11,6 +11,8 @@ export enum PomodoroRunStatus {
 export class PomodoroRun {
   @PrimaryGeneratedColumn('uuid') id!: string;
   @Column({ name: 'room_id', type: 'uuid', nullable: true }) roomId!: string | null;
+  @Column({ name: 'room_name', type: 'varchar', length: 50, nullable: true }) roomName!:
+    string | null;
   @Column({ name: 'planned_duration_seconds', type: 'int' }) plannedDurationSeconds!: number;
   @Column({ name: 'focused_milliseconds', type: 'int', default: 0 }) focusedMilliseconds!: number;
   @Column({ type: 'varchar', length: 16 }) status!: PomodoroRunStatus;

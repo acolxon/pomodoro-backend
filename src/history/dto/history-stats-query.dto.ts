@@ -5,4 +5,5 @@ export class HistoryStatsQueryDto extends PickType(HistoryQueryDto, [
   'status',
   'from',
   'to',
+  'roomId',
 ] as const) {}

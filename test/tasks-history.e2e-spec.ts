@@ -359,9 +359,79 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
       .expect(404);
   });
 
-  it('reverts and reapplies the new migration without removing the existing timer table', async () => {
+  it('filters rooms within personal history and preserves room names after rename and deletion', async () => {
+    const owner = await registerUser(app, 'owner');
+    const stranger = await registerUser(app, 'stranger');
+    const first = await roomFor(owner);
+    const time = controlTime();
+    await pomodoro.start(owner.id, first.id);
+    await ds.query('UPDATE rooms SET name = $1 WHERE id = $2', ['Renamed', first.id]);
+    time.at(30_000);
+    await pomodoro.cancel(owner.id, first.id);
+    await http().post('/rooms/leave').set(as(owner)).expect(200);
+    const second = await roomFor(owner);
+    await ds.query('UPDATE rooms SET name = $1 WHERE id = $2', ['Garden', second.id]);
+    time.at(40_000);
+    await pomodoro.start(owner.id, second.id);
+    time.at(60_000);
+    await pomodoro.cancel(owner.id, second.id);
+
+    const rooms = await http().get('/history/rooms').set(as(owner)).expect(200);
+    expect(rooms.body).toEqual(
+      expect.arrayContaining([
+        { id: first.id, name: 'Study' },
+        { id: second.id, name: 'Garden' },
+      ]),
+    );
+    expect(rooms.body).toHaveLength(2);
+    expect((await http().get('/history/rooms').set(as(stranger)).expect(200)).body).toEqual([]);
+    const page = await http()
+      .get('/history')
+      .query({ roomId: first.id })
+      .set(as(owner))
+      .expect(200);
+    expect(page.body.total).toBe(1);
+    expect(page.body.items[0]).toMatchObject({
+      roomId: first.id,
+      roomName: 'Study',
+      focusedSeconds: 30,
+    });
+    const stats = await http()
+      .get('/history/stats')
+      .query({ roomId: first.id, status: 'cancelled' })
+      .set(as(owner))
+      .expect(200);
+    expect(stats.body).toMatchObject({ totalSessions: 1, totalFocusedSeconds: 30 });
+    expect(
+      (await http().get('/history').query({ roomId: first.id }).set(as(stranger)).expect(200)).body
+        .total,
+    ).toBe(0);
+    expect(
+      (await http().get('/history/stats').query({ roomId: first.id }).set(as(stranger)).expect(200))
+        .body.totalSessions,
+    ).toBe(0);
+    await http().get('/history?roomId=invalid').set(as(owner)).expect(400);
+    await http().get('/history/stats?roomId=invalid').set(as(owner)).expect(400);
+    await http().get('/history/rooms').expect(401);
+    await ds.query('DELETE FROM rooms WHERE id = $1', [first.id]);
+    const retained = await http()
+      .get(`/history/${page.body.items[0].id}`)
+      .set(as(owner))
+      .expect(200);
+    expect(retained.body).toMatchObject({ roomId: null, roomName: 'Study' });
+    expect((await http().get('/history/rooms').set(as(owner)).expect(200)).body).toEqual([
+      { id: second.id, name: 'Garden' },
+    ]);
+  });
+
+  it('reverts and reapplies both history migrations without removing the existing timer table', async () => {
     await ds.undoLastMigration({ transaction: 'all' });
     try {
+      const columns = await ds.query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name IN ('focus_history', 'pomodoro_runs') AND column_name = 'room_name'",
+      );
+      expect(columns).toEqual([]);
+      await ds.undoLastMigration({ transaction: 'all' });
       const [tables] = await ds.query(
         "SELECT to_regclass('tasks') AS tasks, to_regclass('pomodoro_sessions') AS timer",
       );
