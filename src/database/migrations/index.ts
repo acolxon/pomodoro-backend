@@ -4,6 +4,7 @@ import { Rooms1794700800000 } from './1794700800000-Rooms';
 import { PomodoroSessions1794787200000 } from './1794787200000-PomodoroSessions';
 import { TasksAndHistory1794873600000 } from './1794873600000-TasksAndHistory';
 import { HistoryRoomNames1794960000000 } from './1794960000000-HistoryRoomNames';
+import { FocusRewards1795046400000 } from './1795046400000-FocusRewards';
 
 /**
  * Реестр миграций. Каждая новая миграция ОБЯЗАТЕЛЬНО добавляется сюда
@@ -15,4 +16,5 @@ export const ALL_MIGRATIONS: Array<new () => MigrationInterface> = [
   PomodoroSessions1794787200000,
   TasksAndHistory1794873600000,
   HistoryRoomNames1794960000000,
+  FocusRewards1795046400000,
 ];

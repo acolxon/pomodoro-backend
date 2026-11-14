@@ -50,6 +50,18 @@ export class FocusHistory {
   @Column({ name: 'focused_seconds', type: 'int' })
   focusedSeconds!: number;
 
+  @ApiProperty({ example: 25 })
+  @Column({ name: 'xp_earned', type: 'int', default: 0 })
+  xpEarned!: number;
+
+  @ApiProperty({ example: 10 })
+  @Column({ name: 'coins_earned', type: 'int', default: 0 })
+  coinsEarned!: number;
+
+  @ApiProperty({ example: false })
+  @Column({ name: 'team_bonus', type: 'boolean', default: false })
+  teamBonus!: boolean;
+
   @ApiProperty({ type: String, format: 'date-time' })
   @Column({ name: 'started_at', type: 'timestamptz' })
   startedAt!: Date;

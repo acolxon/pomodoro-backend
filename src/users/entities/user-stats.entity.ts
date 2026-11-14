@@ -1,16 +1,9 @@
-import {
-  Column,
-  Entity,
-  JoinColumn,
-  OneToOne,
-  PrimaryColumn,
-  UpdateDateColumn,
-} from 'typeorm';
+import { Column, Entity, JoinColumn, OneToOne, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 import { User } from './user.entity';
 
 /**
  * Игровой прогресс пользователя. XP, уровень и Coins хранятся ТОЛЬКО здесь
- * (кэш журнала economy_transactions, который появится на Этапе 4).
+ * Начисления подтверждаются журналом economy_transactions в той же транзакции.
  */
 @Entity('user_stats')
 export class UserStats {

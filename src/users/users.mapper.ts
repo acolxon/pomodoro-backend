@@ -1,5 +1,6 @@
 import { PublicProfileDto, UserProfileDto } from './dto/user-profile.dto';
 import { User } from './entities/user.entity';
+import { PROGRESSION_RULES, progressionForXp } from '../progression/progression.rules';
 
 /** Сущность никогда не отдаётся клиенту напрямую — только через явные DTO. */
 export function toUserProfile(user: User): UserProfileDto {
@@ -19,6 +20,12 @@ export function toUserProfile(user: User): UserProfileDto {
       sessionsCompleted: user.stats.sessionsCompleted,
       collabSessionsCompleted: user.stats.collabSessionsCompleted,
       activeDays: user.stats.activeDays,
+    },
+    progression: {
+      ...progressionForXp(user.stats.xp),
+      focusXp: PROGRESSION_RULES.focusXp,
+      focusCoins: PROGRESSION_RULES.focusCoins,
+      teamBonusPercent: PROGRESSION_RULES.teamBonusPercent,
     },
     settings: {
       allowPranks: user.settings.allowPranks,

@@ -425,8 +425,10 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
   });
 
   it('reverts and reapplies both history migrations without removing the existing timer table', async () => {
+    // Rewards extends focus_history, so undo it before testing the older migrations.
     await ds.undoLastMigration({ transaction: 'all' });
     try {
+      await ds.undoLastMigration({ transaction: 'all' });
       const columns = await ds.query(
         "SELECT column_name FROM information_schema.columns WHERE table_name IN ('focus_history', 'pomodoro_runs') AND column_name = 'room_name'",
       );

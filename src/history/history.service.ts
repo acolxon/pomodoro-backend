@@ -13,6 +13,7 @@ import { FocusHistory, FocusHistoryStatus } from './entities/focus-history.entit
 import { PomodoroParticipant } from './entities/pomodoro-participant.entity';
 import { PomodoroRun, PomodoroRunStatus } from './entities/pomodoro-run.entity';
 import { historyErrors } from './history.errors';
+import { ProgressionService } from '../progression/progression.service';
 import {
   PomodoroPhase,
   PomodoroSession,
@@ -21,7 +22,10 @@ import {
 
 @Injectable()
 export class HistoryService {
-  constructor(@InjectRepository(FocusHistory) private readonly history: Repository<FocusHistory>) {}
+  constructor(
+    @InjectRepository(FocusHistory) private readonly history: Repository<FocusHistory>,
+    private readonly progression: ProgressionService,
+  ) {}
 
   /** Caller holds the room/timer locks; all writes share the timer transaction. */
   async beginFocus(
@@ -151,6 +155,7 @@ export class HistoryService {
         : PomodoroRunStatus.Cancelled;
     run.endedAt = endedAt;
     await manager.save(run);
+    await this.progression.awardFocus(manager, run);
   }
 
   /** Called inside the membership transaction, after left_at has been recorded. */
