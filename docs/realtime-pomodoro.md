@@ -26,7 +26,9 @@ const socket = io(API_URL, { auth: { token: accessToken } });
 - `room:snapshot` — полный снимок комнаты при входе.
 - `pomodoro:state` — новое состояние таймера, отправляется всем подключённым участникам.
 
-Состояние содержит `status`, `phase`, `durationSeconds`, `startedAt`, `endsAt`, `pausedAt`, `remainingSeconds`, `serverTime`.
+Состояние содержит `status`, `phase`, `durationSeconds`, `startedAt`, `endsAt`, `pausedAt`, `remainingSeconds`, `serverTime` и `pomodoroSessionId`.
+
+`pomodoroSessionId` — постоянный UUID конкретного запуска Focus. Он сохраняется при паузе, продолжении и переходе к Break; в `idle` равен `null`. История всех участников одного запуска ссылается на этот UUID. Сохранение результатов выполняется сервером автоматически; подробности и HTTP API описаны в [Tasks + History](tasks-history.md).
 
 Клиент не должен отправлять секундные тики. Для обратного отсчёта используйте `endsAt - serverTime`, корректируя разницу часов по `serverTime`. После reconnect снова отправьте `room:join` и используйте новый snapshot.
 

@@ -4,6 +4,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 import { RoomDto } from './dto/room.dto';
 import { RoomStatus } from './entities/room.entity';
 import { RoomsService } from './rooms.service';
+import { HistoryService } from '../history/history.service';
 
 /**
  * Unit-тесты ветвлений, не требующих БД: ранние отказы и поведение при ошибках БД.
@@ -31,7 +32,11 @@ describe('RoomsService (unit)', () => {
     const manager = { findOne: jest.fn(), findOneBy: jest.fn(), count: jest.fn() };
     const transaction = jest.fn();
     const dataSource = { manager, transaction } as unknown as DataSource;
-    return { service: new RoomsService(dataSource), manager, transaction };
+    const history = {
+      memberLeft: jest.fn(),
+      closeRoomFocus: jest.fn(),
+    } as unknown as HistoryService;
+    return { service: new RoomsService(dataSource, history), manager, transaction };
   }
 
   async function errorOf(promise: Promise<unknown>): Promise<unknown> {

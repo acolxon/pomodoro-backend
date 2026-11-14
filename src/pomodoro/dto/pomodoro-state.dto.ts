@@ -3,6 +3,7 @@ import { PomodoroPhase, PomodoroStatus } from '../entities/pomodoro-session.enti
 
 export class PomodoroStateDto {
   @ApiProperty({ format: 'uuid' }) roomId!: string;
+  @ApiProperty({ format: 'uuid', nullable: true }) pomodoroSessionId!: string | null;
   @ApiProperty({ enum: PomodoroStatus }) status!: PomodoroStatus;
   @ApiProperty({ enum: PomodoroPhase, nullable: true }) phase!: PomodoroPhase | null;
   @ApiProperty({ example: 1500 }) durationSeconds!: number;

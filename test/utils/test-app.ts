@@ -20,10 +20,6 @@ export async function createTestApp(): Promise<TestContext> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication();
   configureApp(app);
-  await app.init();
-  // Реальный порт нужен, чтобы supertest безопасно выполнял параллельные запросы
-  await app.listen(0);
-
   const dataSource = app.get(DataSource);
   const dbName = String(dataSource.options.database);
   if (!dbName.endsWith('_test')) {
@@ -33,6 +29,10 @@ export async function createTestApp(): Promise<TestContext> {
 
   await dataSource.dropDatabase();
   await dataSource.runMigrations({ transaction: 'each' });
+  // Startup recovery reads the current entity schema, so migrations precede lifecycle hooks.
+  await app.init();
+  // Реальный порт нужен, чтобы supertest безопасно выполнял параллельные запросы
+  await app.listen(0);
   return { app, dataSource };
 }
 

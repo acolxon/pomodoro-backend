@@ -7,6 +7,7 @@ import { Room, RoomStatus } from './entities/room.entity';
 import { generateInviteCode, isValidInviteCode, normalizeInviteCode } from './invite-code';
 import { isInviteCodeCollision, mapRoomDbError, roomErrors } from './rooms.errors';
 import { toRoomDto, toRoomMemberDto } from './rooms.mapper';
+import { HistoryService } from '../history/history.service';
 
 /** Сколько раз пробуем создать комнату при (крайне маловероятной) коллизии invite_code. */
 const INVITE_CODE_ATTEMPTS = 5;
@@ -23,7 +24,10 @@ const INVITE_CODE_ATTEMPTS = 5;
  */
 @Injectable()
 export class RoomsService {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly history: HistoryService,
+  ) {}
 
   /** Создаёт комнату; создатель становится её владельцем и первым участником. */
   async createRoom(userId: string, dto: CreateRoomDto): Promise<RoomDto> {
@@ -126,12 +130,15 @@ export class RoomsService {
           throw roomErrors.notInAnyRoom();
         }
 
-        await manager
+        const departure = await manager
           .createQueryBuilder()
           .update(RoomMember)
           .set({ leftAt: () => 'clock_timestamp()' })
           .where('id = :id', { id: membership.id })
+          .returning('left_at')
           .execute();
+        const leftAt = departure.raw[0].left_at as Date;
+        await this.history.memberLeft(manager, room.id, userId, leftAt);
 
         if (membership.role !== RoomMemberRole.Owner) {
           return { roomId: room.id, roomClosed: false, newOwnerId: null };
@@ -143,6 +150,7 @@ export class RoomsService {
         });
         if (!successor) {
           await manager.update(Room, { id: room.id }, { status: RoomStatus.Closed });
+          await this.history.closeRoomFocus(manager, room.id, leftAt);
           return { roomId: room.id, roomClosed: true, newOwnerId: null };
         }
 

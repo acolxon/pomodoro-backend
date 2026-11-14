@@ -17,6 +17,9 @@ export class PomodoroSession {
   @PrimaryColumn({ name: 'room_id', type: 'uuid' })
   roomId!: string;
 
+  @Column({ name: 'focus_run_id', type: 'uuid', nullable: true })
+  focusRunId!: string | null;
+
   @Column({ type: 'varchar', length: 16, default: PomodoroStatus.Idle })
   status!: PomodoroStatus;
 

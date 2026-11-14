@@ -7,9 +7,11 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { validateEnv } from './config/env.validation';
 import { buildBaseOptions } from './database/typeorm-options';
 import { HealthModule } from './health/health.module';
+import { HistoryModule } from './history/history.module';
 import { RoomsModule } from './rooms/rooms.module';
 import { PomodoroModule } from './pomodoro/pomodoro.module';
 import { UsersModule } from './users/users.module';
+import { TasksModule } from './tasks/tasks.module';
 
 @Module({
   imports: [
@@ -37,6 +39,8 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     RoomsModule,
     PomodoroModule,
+    TasksModule,
+    HistoryModule,
     HealthModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],

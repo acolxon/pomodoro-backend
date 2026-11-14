@@ -1,0 +1,1105 @@
+diff --git a/src/app.module.ts b/src/app.module.ts
+index 7cf9280..d478030 100644
+--- a/src/app.module.ts
++++ b/src/app.module.ts
+@@ -7,9 +7,11 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
+ import { validateEnv } from './config/env.validation';
+ import { buildBaseOptions } from './database/typeorm-options';
+ import { HealthModule } from './health/health.module';
++import { HistoryModule } from './history/history.module';
+ import { PomodoroModule } from './pomodoro/pomodoro.module';
+ import { RealtimeModule } from './realtime/realtime.module';
+ import { RoomsModule } from './rooms/rooms.module';
++import { TasksModule } from './tasks/tasks.module';
+ import { UsersModule } from './users/users.module';
+ 
+ @Module({
+@@ -39,6 +41,8 @@ import { UsersModule } from './users/users.module';
+     RoomsModule,
+     PomodoroModule,
+     RealtimeModule,
++    TasksModule,
++    HistoryModule,
+     HealthModule,
+   ],
+   providers: [{ provide: APP_GUARD, useClass: JwtAuthGuard }],
+diff --git a/src/common/errors/error-codes.ts b/src/common/errors/error-codes.ts
+index c51699d..9b9858d 100644
+--- a/src/common/errors/error-codes.ts
++++ b/src/common/errors/error-codes.ts
+@@ -33,4 +33,10 @@ export enum ErrorCode {
+ 
+   // Pomodoro
+   POMODORO_SESSION_NOT_FOUND = 'POMODORO_SESSION_NOT_FOUND',
++
++  // Tasks / History
++  TASK_NOT_FOUND = 'TASK_NOT_FOUND',
++  ACTIVE_TASK_EXISTS = 'ACTIVE_TASK_EXISTS',
++  HISTORY_NOT_FOUND = 'HISTORY_NOT_FOUND',
++
+ }
+diff --git a/src/database/migrations/1794873600000-TasksAndHistory.ts b/src/database/migrations/1794873600000-TasksAndHistory.ts
+new file mode 100644
+index 0000000..feb7759
+--- /dev/null
++++ b/src/database/migrations/1794873600000-TasksAndHistory.ts
+@@ -0,0 +1,87 @@
++import { MigrationInterface, QueryRunner } from 'typeorm';
++
++/** Этап 4: личные задачи и история завершённых/отменённых фокус-сессий. */
++export class TasksAndHistory1794873600000 implements MigrationInterface {
++  name = 'TasksAndHistory1794873600000';
++
++  public async up(queryRunner: QueryRunner): Promise<void> {
++    await queryRunner.query(`
++      CREATE TABLE "tasks" (
++        "id"           uuid          NOT NULL DEFAULT gen_random_uuid(),
++        "user_id"      uuid          NOT NULL,
++        "title"        varchar(120)  NOT NULL,
++        "description"  text,
++        "status"       varchar(16)   NOT NULL DEFAULT 'todo',
++        "created_at"   timestamptz   NOT NULL DEFAULT now(),
++        "updated_at"   timestamptz   NOT NULL DEFAULT now(),
++        "completed_at" timestamptz,
++        CONSTRAINT "pk_tasks" PRIMARY KEY ("id"),
++        CONSTRAINT "fk_tasks_user" FOREIGN KEY ("user_id")
++          REFERENCES "users" ("id") ON DELETE CASCADE,
++        CONSTRAINT "ck_tasks_title" CHECK (char_length(btrim("title")) BETWEEN 1 AND 120),
++        CONSTRAINT "ck_tasks_status" CHECK ("status" IN ('todo', 'in_progress', 'completed')),
++        CONSTRAINT "ck_tasks_completed_at" CHECK (
++          ("status" = 'completed' AND "completed_at" IS NOT NULL) OR
++          ("status" <> 'completed' AND "completed_at" IS NULL)
++        )
++      )
++    `);
++    await queryRunner.query(
++      `CREATE INDEX "idx_tasks_user_created" ON "tasks" ("user_id", "created_at" DESC)`,
++    );
++    // Один пользователь может иметь только одну задачу в статусе in_progress.
++    await queryRunner.query(
++      `CREATE UNIQUE INDEX "uq_tasks_one_in_progress_per_user" ON "tasks" ("user_id") WHERE "status" = 'in_progress'`,
++    );
++
++    await queryRunner.query(`
++      CREATE TABLE "focus_history" (
++        "id"                       uuid          NOT NULL DEFAULT gen_random_uuid(),
++        "user_id"                  uuid          NOT NULL,
++        "task_id"                  uuid,
++        "task_title"               varchar(120),
++        "room_id"                  uuid,
++        "pomodoro_session_id"      uuid,
++        "status"                   varchar(16)   NOT NULL,
++        "planned_duration_seconds" integer       NOT NULL,
++        "focused_seconds"           integer       NOT NULL,
++        "started_at"                timestamptz   NOT NULL,
++        "ended_at"                  timestamptz   NOT NULL,
++        "created_at"                timestamptz   NOT NULL DEFAULT now(),
++        CONSTRAINT "pk_focus_history" PRIMARY KEY ("id"),
++        CONSTRAINT "fk_focus_history_user" FOREIGN KEY ("user_id")
++          REFERENCES "users" ("id") ON DELETE CASCADE,
++        CONSTRAINT "fk_focus_history_task" FOREIGN KEY ("task_id")
++          REFERENCES "tasks" ("id") ON DELETE SET NULL,
++        CONSTRAINT "fk_focus_history_room" FOREIGN KEY ("room_id")
++          REFERENCES "rooms" ("id") ON DELETE SET NULL,
++        CONSTRAINT "ck_focus_history_status" CHECK ("status" IN ('completed', 'cancelled')),
++        CONSTRAINT "ck_focus_history_planned" CHECK ("planned_duration_seconds" BETWEEN 1 AND 14400),
++        CONSTRAINT "ck_focus_history_focused" CHECK (
++          "focused_seconds" BETWEEN 0 AND "planned_duration_seconds"
++        ),
++        CONSTRAINT "ck_focus_history_interval" CHECK ("ended_at" > "started_at")
++      )
++    `);
++    await queryRunner.query(
++      `CREATE INDEX "idx_focus_history_user_started" ON "focus_history" ("user_id", "started_at" DESC, "id")`,
++    );
++    await queryRunner.query(
++      `CREATE INDEX "idx_focus_history_task" ON "focus_history" ("task_id") WHERE "task_id" IS NOT NULL`,
++    );
++    await queryRunner.query(
++      `CREATE INDEX "idx_focus_history_pomodoro_session" ON "focus_history" ("pomodoro_session_id") WHERE "pomodoro_session_id" IS NOT NULL`,
++    );
++  }
++
++  public async down(queryRunner: QueryRunner): Promise<void> {
++    await queryRunner.query(`DROP INDEX "idx_focus_history_pomodoro_session"`);
++    await queryRunner.query(`DROP INDEX "idx_focus_history_task"`);
++    await queryRunner.query(`DROP INDEX "idx_focus_history_user_started"`);
++    await queryRunner.query(`DROP TABLE "focus_history"`);
++
++    await queryRunner.query(`DROP INDEX "uq_tasks_one_in_progress_per_user"`);
++    await queryRunner.query(`DROP INDEX "idx_tasks_user_created"`);
++    await queryRunner.query(`DROP TABLE "tasks"`);
++  }
++}
+diff --git a/src/database/migrations/index.ts b/src/database/migrations/index.ts
+index 6c7613e..9754e54 100644
+--- a/src/database/migrations/index.ts
++++ b/src/database/migrations/index.ts
+@@ -1,6 +1,7 @@
+ import { MigrationInterface } from 'typeorm';
+ import { InitFoundation1794614400000 } from './1794614400000-InitFoundation';
+ import { Rooms1794700800000 } from './1794700800000-Rooms';
++import { TasksAndHistory1794873600000 } from './1794873600000-TasksAndHistory';
+ import { Pomodoro1794787200000 } from './1794787200000-Pomodoro';
+ 
+ /**
+@@ -11,4 +12,5 @@ export const ALL_MIGRATIONS: Array<new () => MigrationInterface> = [
+   InitFoundation1794614400000,
+   Rooms1794700800000,
+   Pomodoro1794787200000,
++  TasksAndHistory1794873600000,
+ ];
+diff --git a/src/history/dto/create-history.dto.ts b/src/history/dto/create-history.dto.ts
+new file mode 100644
+index 0000000..b4e3c82
+--- /dev/null
++++ b/src/history/dto/create-history.dto.ts
+@@ -0,0 +1,55 @@
++import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
++import { Type } from 'class-transformer';
++import {
++  IsDateString,
++  IsEnum,
++  IsInt,
++  IsOptional,
++  IsUUID,
++  Max,
++  Min,
++} from 'class-validator';
++import { FocusHistoryStatus } from '../entities/focus-history.entity';
++
++export class CreateHistoryDto {
++  @ApiPropertyOptional({ format: 'uuid', description: 'Задача, над которой шла работа' })
++  @IsOptional()
++  @IsUUID()
++  taskId?: string;
++
++  @ApiPropertyOptional({ format: 'uuid', description: 'Комната, в которой проходила сессия' })
++  @IsOptional()
++  @IsUUID()
++  roomId?: string;
++
++  @ApiPropertyOptional({ format: 'uuid', description: 'ID общей Pomodoro-сессии' })
++  @IsOptional()
++  @IsUUID()
++  pomodoroSessionId?: string;
++
++  @ApiProperty({ enum: FocusHistoryStatus, example: FocusHistoryStatus.Completed })
++  @IsEnum(FocusHistoryStatus)
++  status!: FocusHistoryStatus;
++
++  @ApiProperty({ example: 1500, minimum: 1, maximum: 14400 })
++  @Type(() => Number)
++  @IsInt()
++  @Min(1)
++  @Max(14400)
++  plannedDurationSeconds!: number;
++
++  @ApiProperty({ example: 1450, minimum: 0, maximum: 14400 })
++  @Type(() => Number)
++  @IsInt()
++  @Min(0)
++  @Max(14400)
++  focusedSeconds!: number;
++
++  @ApiProperty({ example: '2026-11-14T10:00:00.000Z', format: 'date-time' })
++  @IsDateString()
++  startedAt!: string;
++
++  @ApiProperty({ example: '2026-11-14T10:25:00.000Z', format: 'date-time' })
++  @IsDateString()
++  endedAt!: string;
++}
+diff --git a/src/history/dto/history-query.dto.ts b/src/history/dto/history-query.dto.ts
+new file mode 100644
+index 0000000..2bc6ef0
+--- /dev/null
++++ b/src/history/dto/history-query.dto.ts
+@@ -0,0 +1,36 @@
++import { ApiPropertyOptional } from '@nestjs/swagger';
++import { Type } from 'class-transformer';
++import { IsDateString, IsEnum, IsInt, IsOptional, Max, Min } from 'class-validator';
++import { FocusHistoryStatus } from '../entities/focus-history.entity';
++
++export class HistoryQueryDto {
++  @ApiPropertyOptional({ enum: FocusHistoryStatus })
++  @IsOptional()
++  @IsEnum(FocusHistoryStatus)
++  status?: FocusHistoryStatus;
++
++  @ApiPropertyOptional({ format: 'date-time', description: 'Начало периода, включительно' })
++  @IsOptional()
++  @IsDateString()
++  from?: string;
++
++  @ApiPropertyOptional({ format: 'date-time', description: 'Конец периода, не включительно' })
++  @IsOptional()
++  @IsDateString()
++  to?: string;
++
++  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 50 })
++  @IsOptional()
++  @Type(() => Number)
++  @IsInt()
++  @Min(1)
++  @Max(100)
++  limit = 50;
++
++  @ApiPropertyOptional({ minimum: 0, default: 0 })
++  @IsOptional()
++  @Type(() => Number)
++  @IsInt()
++  @Min(0)
++  offset = 0;
++}
+diff --git a/src/history/dto/history-stats.dto.ts b/src/history/dto/history-stats.dto.ts
+new file mode 100644
+index 0000000..739cf44
+--- /dev/null
++++ b/src/history/dto/history-stats.dto.ts
+@@ -0,0 +1,21 @@
++import { ApiProperty } from '@nestjs/swagger';
++
++export class HistoryStatsDto {
++  @ApiProperty({ example: 18 })
++  totalSessions!: number;
++
++  @ApiProperty({ example: 15 })
++  completedSessions!: number;
++
++  @ApiProperty({ example: 3 })
++  cancelledSessions!: number;
++
++  @ApiProperty({ example: 22500 })
++  totalFocusedSeconds!: number;
++
++  @ApiProperty({ example: 375 })
++  totalFocusedMinutes!: number;
++
++  @ApiProperty({ example: 1500 })
++  averageFocusedSeconds!: number;
++}
+diff --git a/src/history/entities/focus-history.entity.ts b/src/history/entities/focus-history.entity.ts
+new file mode 100644
+index 0000000..16b2f37
+--- /dev/null
++++ b/src/history/entities/focus-history.entity.ts
+@@ -0,0 +1,60 @@
++import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
++import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
++
++export enum FocusHistoryStatus {
++  Completed = 'completed',
++  Cancelled = 'cancelled',
++}
++
++@Entity('focus_history')
++export class FocusHistory {
++  @ApiProperty({ format: 'uuid' })
++  @PrimaryGeneratedColumn('uuid')
++  id!: string;
++
++  @ApiProperty({ format: 'uuid' })
++  @Column({ name: 'user_id', type: 'uuid' })
++  userId!: string;
++
++  @ApiPropertyOptional({ nullable: true })
++  @Column({ name: 'task_id', type: 'uuid', nullable: true })
++  taskId!: string | null;
++
++  /** Снимок названия сохраняет понятную историю после удаления задачи. */
++  @ApiPropertyOptional({ nullable: true })
++  @Column({ name: 'task_title', type: 'varchar', length: 120, nullable: true })
++  taskTitle!: string | null;
++
++  @ApiPropertyOptional({ nullable: true })
++  @Column({ name: 'room_id', type: 'uuid', nullable: true })
++  roomId!: string | null;
++
++  /** ID Pomodoro-сессии из realtime/Pomodoro-модуля. FK намеренно не задан: история переживает её очистку. */
++  @ApiPropertyOptional({ nullable: true })
++  @Column({ name: 'pomodoro_session_id', type: 'uuid', nullable: true })
++  pomodoroSessionId!: string | null;
++
++  @ApiProperty({ enum: FocusHistoryStatus })
++  @Column({ type: 'varchar', length: 16 })
++  status!: FocusHistoryStatus;
++
++  @ApiProperty({ example: 1500 })
++  @Column({ name: 'planned_duration_seconds', type: 'int' })
++  plannedDurationSeconds!: number;
++
++  @ApiProperty({ example: 1500 })
++  @Column({ name: 'focused_seconds', type: 'int' })
++  focusedSeconds!: number;
++
++  @ApiProperty({ type: String, format: 'date-time' })
++  @Column({ name: 'started_at', type: 'timestamptz' })
++  startedAt!: Date;
++
++  @ApiProperty({ type: String, format: 'date-time' })
++  @Column({ name: 'ended_at', type: 'timestamptz' })
++  endedAt!: Date;
++
++  @ApiProperty({ type: String, format: 'date-time' })
++  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
++  createdAt!: Date;
++}
+diff --git a/src/history/history.controller.ts b/src/history/history.controller.ts
+new file mode 100644
+index 0000000..a38931f
+--- /dev/null
++++ b/src/history/history.controller.ts
+@@ -0,0 +1,88 @@
++import {
++  Body,
++  Controller,
++  Get,
++  Param,
++  Post,
++  Query,
++} from '@nestjs/common';
++import {
++  ApiBearerAuth,
++  ApiBadRequestResponse,
++  ApiCreatedResponse,
++  ApiForbiddenResponse,
++  ApiNotFoundResponse,
++  ApiOkResponse,
++  ApiOperation,
++  ApiTags,
++  ApiUnauthorizedResponse,
++} from '@nestjs/swagger';
++import { AuthUser } from '../auth/types/auth-user';
++import { CurrentUser } from '../common/decorators/current-user.decorator';
++import { uuidPipe } from '../common/pipes/uuid.pipe';
++import { CreateHistoryDto } from './dto/create-history.dto';
++import { HistoryQueryDto } from './dto/history-query.dto';
++import { HistoryStatsDto } from './dto/history-stats.dto';
++import { FocusHistory } from './entities/focus-history.entity';
++import { HistoryService } from './history.service';
++
++@ApiTags('history')
++@ApiBearerAuth('access-token')
++@ApiUnauthorizedResponse({ description: 'UNAUTHORIZED — нет или недействителен JWT' })
++@Controller('history')
++export class HistoryController {
++  constructor(private readonly history: HistoryService) {}
++
++  @Post()
++  @ApiOperation({
++    summary: 'Сохранить результат Pomodoro-сессии',
++    description:
++      'Вызывается клиентом после завершения или отмены фокус-фазы. ' +
++      'Одна запись принадлежит текущему пользователю.',
++  })
++  @ApiCreatedResponse({ type: FocusHistory })
++  @ApiBadRequestResponse({ description: 'VALIDATION_ERROR или BAD_REQUEST' })
++  @ApiNotFoundResponse({ description: 'TASK_NOT_FOUND' })
++  @ApiForbiddenResponse({ description: 'NOT_IN_ROOM' })
++  create(@CurrentUser() user: AuthUser, @Body() dto: CreateHistoryDto): Promise<FocusHistory> {
++    return this.history.create(user.id, dto);
++  }
++
++  @Get('stats')
++  @ApiOperation({ summary: 'Статистика Pomodoro-сессий за период' })
++  @ApiOkResponse({ type: HistoryStatsDto })
++  getStats(
++    @CurrentUser() user: AuthUser,
++    @Query() query: HistoryQueryDto,
++  ): Promise<HistoryStatsDto> {
++    return this.history.getStats(user.id, query);
++  }
++
++  @Get()
++  @ApiOperation({ summary: 'История Pomodoro-сессий' })
++  @ApiOkResponse({
++    schema: {
++      example: {
++        items: [],
++        total: 0,
++      },
++    },
++  })
++  findAll(
++    @CurrentUser() user: AuthUser,
++    @Query() query: HistoryQueryDto,
++  ): Promise<{ items: FocusHistory[]; total: number }> {
++    return this.history.findAll(user.id, query);
++  }
++
++  @Get(':id')
++  @ApiOperation({ summary: 'Одна запись истории' })
++  @ApiOkResponse({ type: FocusHistory })
++  @ApiNotFoundResponse({ description: 'HISTORY_NOT_FOUND' })
++  findOne(
++    @CurrentUser() user: AuthUser,
++    @Param('id', uuidPipe) id: string,
++  ): Promise<FocusHistory> {
++    return this.history.findOne(user.id, id);
++  }
++}
+diff --git a/src/history/history.errors.ts b/src/history/history.errors.ts
+new file mode 100644
+index 0000000..fc26c1c
+--- /dev/null
++++ b/src/history/history.errors.ts
+@@ -0,0 +1,22 @@
++import { HttpStatus } from '@nestjs/common';
++import { AppException } from '../common/errors/app.exception';
++import { ErrorCode } from '../common/errors/error-codes';
++
++export const historyErrors = {
++  taskNotFound: () =>
++    new AppException(ErrorCode.TASK_NOT_FOUND, 'Задача не найдена', HttpStatus.NOT_FOUND),
++  roomMembershipNotFound: () =>
++    new AppException(
++      ErrorCode.NOT_IN_ROOM,
++      'Пользователь не состоял в указанной комнате',
++      HttpStatus.FORBIDDEN,
++    ),
++  recordNotFound: () =>
++    new AppException(ErrorCode.HISTORY_NOT_FOUND, 'Запись истории не найдена', HttpStatus.NOT_FOUND),
++  invalidInterval: () =>
++    new AppException(
++      ErrorCode.BAD_REQUEST,
++      'Некорректный временной интервал или длительность сессии',
++      HttpStatus.BAD_REQUEST,
++    ),
++};
+diff --git a/src/history/history.module.ts b/src/history/history.module.ts
+new file mode 100644
+index 0000000..75625dc
+--- /dev/null
++++ b/src/history/history.module.ts
+@@ -0,0 +1,14 @@
++import { Module } from '@nestjs/common';
++import { TypeOrmModule } from '@nestjs/typeorm';
++import { RoomMember } from '../rooms/entities/room-member.entity';
++import { Task } from '../tasks/entities/task.entity';
++import { HistoryController } from './history.controller';
++import { FocusHistory } from './entities/focus-history.entity';
++import { HistoryService } from './history.service';
++
++@Module({
++  imports: [TypeOrmModule.forFeature([FocusHistory, Task, RoomMember])],
++  controllers: [HistoryController],
++  providers: [HistoryService],
++})
++export class HistoryModule {}
+diff --git a/src/history/history.service.ts b/src/history/history.service.ts
+new file mode 100644
+index 0000000..8d3ceee
+--- /dev/null
++++ b/src/history/history.service.ts
+@@ -0,0 +1,124 @@
++import { Injectable } from '@nestjs/common';
++import { InjectRepository } from '@nestjs/typeorm';
++import { Repository, SelectQueryBuilder } from 'typeorm';
++import { RoomMember } from '../rooms/entities/room-member.entity';
++import { Task } from '../tasks/entities/task.entity';
++import { CreateHistoryDto } from './dto/create-history.dto';
++import { HistoryQueryDto } from './dto/history-query.dto';
++import { HistoryStatsDto } from './dto/history-stats.dto';
++import { FocusHistory } from './entities/focus-history.entity';
++import { historyErrors } from './history.errors';
++
++@Injectable()
++export class HistoryService {
++  constructor(
++    @InjectRepository(FocusHistory)
++    private readonly history: Repository<FocusHistory>,
++    @InjectRepository(Task)
++    private readonly tasks: Repository<Task>,
++    @InjectRepository(RoomMember)
++    private readonly roomMembers: Repository<RoomMember>,
++  ) {}
++
++  async create(userId: string, dto: CreateHistoryDto): Promise<FocusHistory> {
++    const startedAt = new Date(dto.startedAt);
++    const endedAt = new Date(dto.endedAt);
++    const elapsedSeconds = Math.floor((endedAt.getTime() - startedAt.getTime()) / 1000);
++
++    if (
++      !Number.isFinite(elapsedSeconds) ||
++      elapsedSeconds < 1 ||
++      dto.focusedSeconds > dto.plannedDurationSeconds ||
++      dto.focusedSeconds > elapsedSeconds + 1
++    ) {
++      throw historyErrors.invalidInterval();
++    }
++
++    let taskTitle: string | null = null;
++    if (dto.taskId) {
++      const task = await this.tasks.findOneBy({ id: dto.taskId, userId });
++      if (!task) throw historyErrors.taskNotFound();
++      taskTitle = task.title;
++    }
++
++    if (dto.roomId) {
++      const membership = await this.roomMembers.findOneBy({ roomId: dto.roomId, userId });
++      if (!membership) throw historyErrors.roomMembershipNotFound();
++    }
++
++    return this.history.save(
++      this.history.create({
++        userId,
++        taskId: dto.taskId ?? null,
++        taskTitle,
++        roomId: dto.roomId ?? null,
++        pomodoroSessionId: dto.pomodoroSessionId ?? null,
++        status: dto.status,
++        plannedDurationSeconds: dto.plannedDurationSeconds,
++        focusedSeconds: dto.focusedSeconds,
++        startedAt,
++        endedAt,
++      }),
++    );
++  }
++
++  async findAll(userId: string, query: HistoryQueryDto): Promise<{ items: FocusHistory[]; total: number }> {
++    const builder = this.filteredQuery(userId, query);
++    const [items, total] = await builder
++      .orderBy('history.startedAt', 'DESC')
++      .addOrderBy('history.id', 'DESC')
++      .skip(query.offset ?? 0)
++      .take(query.limit ?? 50)
++      .getManyAndCount();
++    return { items, total };
++  }
++
++  async findOne(userId: string, historyId: string): Promise<FocusHistory> {
++    const record = await this.history.findOneBy({ id: historyId, userId });
++    if (!record) throw historyErrors.recordNotFound();
++    return record;
++  }
++
++  async getStats(userId: string, query: Pick<HistoryQueryDto, 'from' | 'to'> = {}): Promise<HistoryStatsDto> {
++    const builder = this.filteredQuery(userId, query);
++    const row = await builder
++      .select('COUNT(*)', 'totalSessions')
++      .addSelect("COUNT(*) FILTER (WHERE history.status = 'completed')", 'completedSessions')
++      .addSelect("COUNT(*) FILTER (WHERE history.status = 'cancelled')", 'cancelledSessions')
++      .addSelect('COALESCE(SUM(history.focusedSeconds), 0)', 'totalFocusedSeconds')
++      .getRawOne<{
++        totalSessions: string;
++        completedSessions: string;
++        cancelledSessions: string;
++        totalFocusedSeconds: string;
++      }>();
++
++    const totalSessions = Number(row?.totalSessions ?? 0);
++    const completedSessions = Number(row?.completedSessions ?? 0);
++    const cancelledSessions = Number(row?.cancelledSessions ?? 0);
++    const totalFocusedSeconds = Number(row?.totalFocusedSeconds ?? 0);
++
++    return {
++      totalSessions,
++      completedSessions,
++      cancelledSessions,
++      totalFocusedSeconds,
++      totalFocusedMinutes: Math.floor(totalFocusedSeconds / 60),
++      averageFocusedSeconds:
++        totalSessions > 0 ? Math.round(totalFocusedSeconds / totalSessions) : 0,
++    };
++  }
++
++  private filteredQuery(
++    userId: string,
++    query: Pick<HistoryQueryDto, 'status' | 'from' | 'to'>,
++  ): SelectQueryBuilder<FocusHistory> {
++    const builder = this.history.createQueryBuilder('history').where('history.userId = :userId', {
++      userId,
++    });
++    if (query.status) builder.andWhere('history.status = :status', { status: query.status });
++    if (query.from) builder.andWhere('history.startedAt >= :from', { from: query.from });
++    if (query.to) builder.andWhere('history.startedAt < :to', { to: query.to });
++    return builder;
++  }
++}
+diff --git a/src/tasks/dto/create-task.dto.ts b/src/tasks/dto/create-task.dto.ts
+new file mode 100644
+index 0000000..d00d184
+--- /dev/null
++++ b/src/tasks/dto/create-task.dto.ts
+@@ -0,0 +1,20 @@
++import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
++import { Transform } from 'class-transformer';
++import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
++import { trimString } from '../../common/utils/transformers';
++
++export class CreateTaskDto {
++  @ApiProperty({ example: 'Finish backend API', minLength: 1, maxLength: 120 })
++  @Transform(trimString)
++  @IsString()
++  @IsNotEmpty()
++  @MaxLength(120)
++  title!: string;
++
++  @ApiPropertyOptional({ example: 'Implement tasks and history endpoints', maxLength: 5000 })
++  @IsOptional()
++  @Transform(trimString)
++  @IsString()
++  @MaxLength(5000)
++  description?: string;
++}
+diff --git a/src/tasks/dto/task-query.dto.ts b/src/tasks/dto/task-query.dto.ts
+new file mode 100644
+index 0000000..6886d35
+--- /dev/null
++++ b/src/tasks/dto/task-query.dto.ts
+@@ -0,0 +1,10 @@
++import { ApiPropertyOptional } from '@nestjs/swagger';
++import { IsEnum, IsOptional } from 'class-validator';
++import { TaskStatus } from '../entities/task.entity';
++
++export class TaskQueryDto {
++  @ApiPropertyOptional({ enum: TaskStatus })
++  @IsOptional()
++  @IsEnum(TaskStatus)
++  status?: TaskStatus;
++}
+diff --git a/src/tasks/dto/update-task.dto.ts b/src/tasks/dto/update-task.dto.ts
+new file mode 100644
+index 0000000..27c0906
+--- /dev/null
++++ b/src/tasks/dto/update-task.dto.ts
+@@ -0,0 +1,27 @@
++import { ApiPropertyOptional } from '@nestjs/swagger';
++import { Transform } from 'class-transformer';
++import { IsEnum, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
++import { trimString } from '../../common/utils/transformers';
++import { TaskStatus } from '../entities/task.entity';
++
++export class UpdateTaskDto {
++  @ApiPropertyOptional({ example: 'Finish backend API', minLength: 1, maxLength: 120 })
++  @IsOptional()
++  @Transform(trimString)
++  @IsString()
++  @IsNotEmpty()
++  @MaxLength(120)
++  title?: string;
++
++  @ApiPropertyOptional({ example: 'Add validation and e2e tests', maxLength: 5000, nullable: true })
++  @IsOptional()
++  @Transform(({ value }) => (value === '' ? null : value))
++  @IsString()
++  @MaxLength(5000)
++  description?: string | null;
++
++  @ApiPropertyOptional({ enum: TaskStatus, example: TaskStatus.InProgress })
++  @IsOptional()
++  @IsEnum(TaskStatus)
++  status?: TaskStatus;
++}
+diff --git a/src/tasks/entities/task.entity.ts b/src/tasks/entities/task.entity.ts
+new file mode 100644
+index 0000000..8fc0b82
+--- /dev/null
++++ b/src/tasks/entities/task.entity.ts
+@@ -0,0 +1,49 @@
++import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
++import {
++  Column,
++  CreateDateColumn,
++  Entity,
++  PrimaryGeneratedColumn,
++  UpdateDateColumn,
++} from 'typeorm';
++
++export enum TaskStatus {
++  Todo = 'todo',
++  InProgress = 'in_progress',
++  Completed = 'completed',
++}
++
++@Entity('tasks')
++export class Task {
++  @ApiProperty({ format: 'uuid' })
++  @PrimaryGeneratedColumn('uuid')
++  id!: string;
++
++  @ApiProperty({ format: 'uuid' })
++  @Column({ name: 'user_id', type: 'uuid' })
++  userId!: string;
++
++  @ApiProperty({ example: 'Finish backend API', maxLength: 120 })
++  @Column({ type: 'varchar', length: 120 })
++  title!: string;
++
++  @ApiPropertyOptional({ nullable: true })
++  @Column({ type: 'text', nullable: true })
++  description!: string | null;
++
++  @ApiProperty({ enum: TaskStatus })
++  @Column({ type: 'varchar', length: 16, default: TaskStatus.Todo })
++  status!: TaskStatus;
++
++  @ApiProperty({ type: String, format: 'date-time' })
++  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
++  createdAt!: Date;
++
++  @ApiProperty({ type: String, format: 'date-time' })
++  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
++  updatedAt!: Date;
++
++  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
++  @Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
++  completedAt!: Date | null;
++}
+diff --git a/src/tasks/tasks.controller.ts b/src/tasks/tasks.controller.ts
+new file mode 100644
+index 0000000..df9545a
+--- /dev/null
++++ b/src/tasks/tasks.controller.ts
+@@ -0,0 +1,84 @@
++import {
++  Body,
++  Controller,
++  Delete,
++  Get,
++  HttpCode,
++  HttpStatus,
++  Param,
++  Patch,
++  Post,
++  Query,
++} from '@nestjs/common';
++import {
++  ApiBearerAuth,
++  ApiBadRequestResponse,
++  ApiConflictResponse,
++  ApiCreatedResponse,
++  ApiNotFoundResponse,
++  ApiOkResponse,
++  ApiOperation,
++  ApiTags,
++  ApiUnauthorizedResponse,
++} from '@nestjs/swagger';
++import { AuthUser } from '../auth/types/auth-user';
++import { CurrentUser } from '../common/decorators/current-user.decorator';
++import { uuidPipe } from '../common/pipes/uuid.pipe';
++import { CreateTaskDto } from './dto/create-task.dto';
++import { TaskQueryDto } from './dto/task-query.dto';
++import { UpdateTaskDto } from './dto/update-task.dto';
++import { Task } from './entities/task.entity';
++import { TasksService } from './tasks.service';
++
++@ApiTags('tasks')
++@ApiBearerAuth('access-token')
++@ApiUnauthorizedResponse({ description: 'UNAUTHORIZED — нет или недействителен JWT' })
++@Controller('tasks')
++export class TasksController {
++  constructor(private readonly tasks: TasksService) {}
++
++  @Post()
++  @ApiOperation({ summary: 'Создать личную задачу' })
++  @ApiCreatedResponse({ type: Task })
++  @ApiBadRequestResponse({ description: 'VALIDATION_ERROR' })
++  create(@CurrentUser() user: AuthUser, @Body() dto: CreateTaskDto): Promise<Task> {
++    return this.tasks.create(user.id, dto);
++  }
++
++  @Get()
++  @ApiOperation({ summary: 'Список личных задач' })
++  @ApiOkResponse({ type: [Task] })
++  findAll(@CurrentUser() user: AuthUser, @Query() query: TaskQueryDto): Promise<Task[]> {
++    return this.tasks.findAll(user.id, query.status);
++  }
++
++  @Get(':id')
++  @ApiOperation({ summary: 'Получить задачу' })
++  @ApiOkResponse({ type: Task })
++  @ApiNotFoundResponse({ description: 'TASK_NOT_FOUND' })
++  findOne(@CurrentUser() user: AuthUser, @Param('id', uuidPipe) id: string): Promise<Task> {
++    return this.tasks.findOne(user.id, id);
++  }
++
++  @Patch(':id')
++  @ApiOperation({ summary: 'Изменить задачу или её статус' })
++  @ApiOkResponse({ type: Task })
++  @ApiBadRequestResponse({ description: 'VALIDATION_ERROR' })
++  @ApiNotFoundResponse({ description: 'TASK_NOT_FOUND' })
++  @ApiConflictResponse({ description: 'ACTIVE_TASK_EXISTS' })
++  update(
++    @CurrentUser() user: AuthUser,
++    @Param('id', uuidPipe) id: string,
++    @Body() dto: UpdateTaskDto,
++  ): Promise<Task> {
++    return this.tasks.update(user.id, id, dto);
++  }
++
++  @Delete(':id')
++  @HttpCode(HttpStatus.NO_CONTENT)
++  @ApiOperation({ summary: 'Удалить задачу' })
++  @ApiNotFoundResponse({ description: 'TASK_NOT_FOUND' })
++  async remove(@CurrentUser() user: AuthUser, @Param('id', uuidPipe) id: string): Promise<void> {
++    await this.tasks.remove(user.id, id);
++  }
++}
+diff --git a/src/tasks/tasks.errors.ts b/src/tasks/tasks.errors.ts
+new file mode 100644
+index 0000000..adda640
+--- /dev/null
++++ b/src/tasks/tasks.errors.ts
+@@ -0,0 +1,22 @@
++import { HttpStatus } from '@nestjs/common';
++import { AppException } from '../common/errors/app.exception';
++import { ErrorCode } from '../common/errors/error-codes';
++
++export const taskErrors = {
++  notFound: () =>
++    new AppException(ErrorCode.TASK_NOT_FOUND, 'Задача не найдена', HttpStatus.NOT_FOUND),
++  activeTaskExists: () =>
++    new AppException(
++      ErrorCode.ACTIVE_TASK_EXISTS,
++      'У пользователя уже есть активная задача',
++      HttpStatus.CONFLICT,
++    ),
++};
++
++export function isActiveTaskCollision(error: unknown): boolean {
++  if (!error || typeof error !== 'object') return false;
++  const value = error as { code?: string; constraint?: string; driverError?: { code?: string; constraint?: string } };
++  const code = value.code ?? value.driverError?.code;
++  const constraint = value.constraint ?? value.driverError?.constraint;
++  return code === '23505' && constraint === 'uq_tasks_one_in_progress_per_user';
++}
+diff --git a/src/tasks/tasks.module.ts b/src/tasks/tasks.module.ts
+new file mode 100644
+index 0000000..03845dd
+--- /dev/null
++++ b/src/tasks/tasks.module.ts
+@@ -0,0 +1,13 @@
++import { Module } from '@nestjs/common';
++import { TypeOrmModule } from '@nestjs/typeorm';
++import { Task } from './entities/task.entity';
++import { TasksController } from './tasks.controller';
++import { TasksService } from './tasks.service';
++
++@Module({
++  imports: [TypeOrmModule.forFeature([Task])],
++  controllers: [TasksController],
++  providers: [TasksService],
++  exports: [TasksService],
++})
++export class TasksModule {}
+diff --git a/src/tasks/tasks.service.ts b/src/tasks/tasks.service.ts
+new file mode 100644
+index 0000000..90098c6
+--- /dev/null
++++ b/src/tasks/tasks.service.ts
+@@ -0,0 +1,58 @@
++import { Injectable } from '@nestjs/common';
++import { InjectRepository } from '@nestjs/typeorm';
++import { Repository } from 'typeorm';
++import { CreateTaskDto } from './dto/create-task.dto';
++import { UpdateTaskDto } from './dto/update-task.dto';
++import { Task, TaskStatus } from './entities/task.entity';
++import { isActiveTaskCollision, taskErrors } from './tasks.errors';
++
++@Injectable()
++export class TasksService {
++  constructor(@InjectRepository(Task) private readonly tasks: Repository<Task>) {}
++
++  async create(userId: string, dto: CreateTaskDto): Promise<Task> {
++    const task = this.tasks.create({
++      userId,
++      title: dto.title,
++      description: dto.description?.trim() || null,
++      status: TaskStatus.Todo,
++      completedAt: null,
++    });
++    return this.tasks.save(task);
++  }
++
++  findAll(userId: string, status?: TaskStatus): Promise<Task[]> {
++    return this.tasks.find({
++      where: status ? { userId, status } : { userId },
++      order: { createdAt: 'DESC', id: 'DESC' },
++    });
++  }
++
++  async findOne(userId: string, taskId: string): Promise<Task> {
++    const task = await this.tasks.findOneBy({ id: taskId, userId });
++    if (!task) throw taskErrors.notFound();
++    return task;
++  }
++
++  async update(userId: string, taskId: string, dto: UpdateTaskDto): Promise<Task> {
++    const task = await this.findOne(userId, taskId);
++    if (dto.title !== undefined) task.title = dto.title;
++    if (dto.description !== undefined) task.description = dto.description;
++    if (dto.status !== undefined) {
++      task.status = dto.status;
++      task.completedAt = dto.status === TaskStatus.Completed ? new Date() : null;
++    }
++
++    try {
++      return await this.tasks.save(task);
++    } catch (error) {
++      if (isActiveTaskCollision(error)) throw taskErrors.activeTaskExists();
++      throw error;
++    }
++  }
++
++  async remove(userId: string, taskId: string): Promise<void> {
++    const task = await this.findOne(userId, taskId);
++    await this.tasks.remove(task);
++  }
++}
+diff --git a/test/tasks-history.e2e-spec.ts b/test/tasks-history.e2e-spec.ts
+new file mode 100644
+index 0000000..9b2607c
+--- /dev/null
++++ b/test/tasks-history.e2e-spec.ts
+@@ -0,0 +1,149 @@
++import { INestApplication } from '@nestjs/common';
++import request from 'supertest';
++import { DataSource } from 'typeorm';
++import { createTestApp, RegisteredUser, registerUser, resetData } from './utils/test-app';
++
++describe('Tasks and History (e2e)', () => {
++  let app: INestApplication;
++  let ds: DataSource;
++  const http = () => request(app.getHttpServer());
++  const as = (user: RegisteredUser) => ({ Authorization: `Bearer ${user.token}` });
++
++  beforeAll(async () => {
++    ({ app, dataSource: ds } = await createTestApp());
++  });
++
++  beforeEach(async () => {
++    await resetData(ds);
++  });
++
++  afterAll(async () => {
++    await app.close();
++  });
++
++  it('создаёт личные задачи и не позволяет иметь две активные задачи', async () => {
++    const user = await registerUser(app);
++    const first = await http()
++      .post('/tasks')
++      .set(as(user))
++      .send({ title: 'Finish API', description: 'Tasks and history' })
++      .expect(201);
++
++    expect(first.body).toMatchObject({
++      userId: user.id,
++      title: 'Finish API',
++      status: 'todo',
++      completedAt: null,
++    });
++
++    await http()
++      .patch(`/tasks/${first.body.id}`)
++      .set(as(user))
++      .send({ status: 'in_progress' })
++      .expect(200);
++
++    const second = await http()
++      .post('/tasks')
++      .set(as(user))
++      .send({ title: 'Write tests' })
++      .expect(201);
++
++    const conflict = await http()
++      .patch(`/tasks/${second.body.id}`)
++      .set(as(user))
++      .send({ status: 'in_progress' })
++      .expect(409);
++    expect(conflict.body.code).toBe('ACTIVE_TASK_EXISTS');
++
++    const completed = await http()
++      .patch(`/tasks/${first.body.id}`)
++      .set(as(user))
++      .send({ status: 'completed' })
++      .expect(200);
++    expect(completed.body.completedAt).toEqual(expect.any(String));
++  });
++
++  it('изолирует задачи между пользователями', async () => {
++    const alice = await registerUser(app, 'alice');
++    const bob = await registerUser(app, 'bob');
++    const task = await http().post('/tasks').set(as(alice)).send({ title: 'Private task' }).expect(201);
++
++    const response = await http().get(`/tasks/${task.body.id}`).set(as(bob)).expect(404);
++    expect(response.body.code).toBe('TASK_NOT_FOUND');
++  });
++
++  it('сохраняет историю фокус-сессии и считает статистику', async () => {
++    const user = await registerUser(app);
++    const task = await http().post('/tasks').set(as(user)).send({ title: 'Build Tomato' }).expect(201);
++
++    const record = await http()
++      .post('/history')
++      .set(as(user))
++      .send({
++        taskId: task.body.id,
++        status: 'completed',
++        plannedDurationSeconds: 1500,
++        focusedSeconds: 1480,
++        startedAt: '2026-11-14T10:00:00.000Z',
++        endedAt: '2026-11-14T10:25:00.000Z',
++      })
++      .expect(201);
++
++    expect(record.body).toMatchObject({
++      userId: user.id,
++      taskId: task.body.id,
++      taskTitle: 'Build Tomato',
++      status: 'completed',
++      plannedDurationSeconds: 1500,
++      focusedSeconds: 1480,
++    });
++
++    const list = await http().get('/history?limit=10').set(as(user)).expect(200);
++    expect(list.body.total).toBe(1);
++    expect(list.body.items).toHaveLength(1);
++
++    const stats = await http().get('/history/stats').set(as(user)).expect(200);
++    expect(stats.body).toMatchObject({
++      totalSessions: 1,
++      completedSessions: 1,
++      cancelledSessions: 0,
++      totalFocusedSeconds: 1480,
++      totalFocusedMinutes: 24,
++    });
++  });
++
++  it('не принимает невозможную длительность и не показывает чужую историю', async () => {
++    const alice = await registerUser(app, 'alice');
++    const bob = await registerUser(app, 'bob');
++    const created = await http()
++      .post('/history')
++      .set(as(alice))
++      .send({
++        status: 'cancelled',
++        plannedDurationSeconds: 1500,
++        focusedSeconds: 250,
++        startedAt: '2026-11-14T10:00:00.000Z',
++        endedAt: '2026-11-14T10:05:00.000Z',
++      })
++      .expect(201);
++
++    const invalid = await http()
++      .post('/history')
++      .set(as(alice))
++      .send({
++        status: 'completed',
++        plannedDurationSeconds: 1500,
++        focusedSeconds: 1500,
++        startedAt: '2026-11-14T10:00:00.000Z',
++        endedAt: '2026-11-14T10:05:00.000Z',
++      })
++      .expect(400);
++    expect(invalid.body.code).toBe('BAD_REQUEST');
++
++    const hidden = await http()
++      .get(`/history/${created.body.id}`)
++      .set(as(bob))
++      .expect(404);
++    expect(hidden.body.code).toBe('HISTORY_NOT_FOUND');
++  });
++});

@@ -6,9 +6,16 @@ import { UsersModule } from '../users/users.module';
 import { PomodoroSession } from './entities/pomodoro-session.entity';
 import { PomodoroService } from './pomodoro.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { HistoryModule } from '../history/history.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([PomodoroSession]), AuthModule, UsersModule, RoomsModule],
+  imports: [
+    TypeOrmModule.forFeature([PomodoroSession]),
+    AuthModule,
+    UsersModule,
+    RoomsModule,
+    HistoryModule,
+  ],
   providers: [PomodoroService, RealtimeGateway],
   exports: [PomodoroService],
 })
