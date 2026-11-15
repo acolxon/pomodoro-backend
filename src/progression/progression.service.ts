@@ -6,7 +6,7 @@ import { PomodoroRun, PomodoroRunStatus } from '../history/entities/pomodoro-run
 import { UserStats } from '../users/entities/user-stats.entity';
 import { UserSettings } from '../users/entities/user-settings.entity';
 import { EconomyTransaction } from './entities/economy-transaction.entity';
-import { activityDate, focusReward, progressionForXp } from './progression.rules';
+import { activityDate, boostedXp, focusReward, progressionForXp } from './progression.rules';
 
 @Injectable()
 export class ProgressionService {
@@ -51,15 +51,25 @@ export class ProgressionService {
         userId: participant.userId,
         activityDate: day,
       });
+      // Stats row serializes purchases and rewards for this user. A charge is consumed
+      // only after eligibility and idempotency checks, inside the finalization transaction.
+      // TypeORM's PostgreSQL runner returns [rows, affectedCount] for UPDATE.
+      const [consumed]: [Array<{ quantity: number }>, number] = await manager.query(
+        `UPDATE xp_booster_inventory SET quantity = quantity - 1, updated_at = now()
+         WHERE user_id = $1 AND quantity > 0 RETURNING quantity`,
+        [participant.userId],
+      );
+      const earnedXp = consumed.length ? boostedXp(reward.xp) : reward.xp;
       // Unique constraint is an additional guard; do not ignore unrelated DB errors.
       await manager.insert(EconomyTransaction, {
         ...key,
-        ...reward,
+        xp: earnedXp,
+        coins: reward.coins,
         teamBonus,
         activityDate: day,
         earnedAt: run.endedAt,
       });
-      stats.xp += reward.xp;
+      stats.xp += earnedXp;
       stats.coins += reward.coins;
       stats.level = progressionForXp(stats.xp).level;
       stats.sessionsCompleted += 1;
@@ -71,7 +81,7 @@ export class ProgressionService {
         FocusHistory,
         { pomodoroSessionId: run.id, userId: participant.userId },
         {
-          xpEarned: reward.xp,
+          xpEarned: earnedXp,
           coinsEarned: reward.coins,
           teamBonus,
         },

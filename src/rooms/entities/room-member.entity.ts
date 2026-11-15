@@ -28,6 +28,9 @@ export class RoomMember {
   @Column({ type: 'varchar', length: 16, default: RoomMemberRole.Member })
   role!: RoomMemberRole;
 
+  @Column({ type: 'boolean', default: false })
+  ready!: boolean;
+
   /** Значение ставит БД (DEFAULT clock_timestamp()): не передаётся при вставке. */
   @Column({ name: 'joined_at', type: 'timestamptz', insert: false, update: false })
   joinedAt!: Date;

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, IsNull, Repository, SelectQueryBuilder } from 'typeorm';
 import { RoomMember } from '../rooms/entities/room-member.entity';
@@ -35,6 +35,17 @@ export class HistoryService {
     plannedDurationSeconds: number,
   ): Promise<string> {
     const room = await manager.findOneByOrFail(Room, { id: roomId });
+    const members = await manager.find(RoomMember, { where: { roomId, leftAt: IsNull() } });
+    if (!members.length || members.some((member) => !member.ready))
+      throw new ConflictException('Для запуска все участники должны отметить готовность');
+    const tasks = await manager.find(Task, {
+      where: { userId: In(members.map((member) => member.userId)), status: TaskStatus.InProgress },
+      order: { id: 'ASC' },
+      lock: { mode: 'pessimistic_read' },
+    });
+    if (tasks.length !== members.length)
+      throw new ConflictException('Каждый участник должен выбрать активную задачу');
+    const taskByUser = new Map(tasks.map((task) => [task.userId, task]));
     const run = await manager.save(
       manager.create(PomodoroRun, {
         roomId,
@@ -46,17 +57,7 @@ export class HistoryService {
         endedAt: null,
       }),
     );
-    const members = await manager.find(RoomMember, { where: { roomId, leftAt: IsNull() } });
     if (members.length > 0) {
-      const tasks = await manager.find(Task, {
-        where: {
-          userId: In(members.map((member) => member.userId)),
-          status: TaskStatus.InProgress,
-        },
-        order: { id: 'ASC' },
-        lock: { mode: 'pessimistic_read' },
-      });
-      const taskByUser = new Map(tasks.map((task) => [task.userId, task]));
       await manager.insert(
         PomodoroParticipant,
         members.map((member) => ({
@@ -69,6 +70,7 @@ export class HistoryService {
         })),
       );
     }
+    await manager.update(RoomMember, { roomId, leftAt: IsNull() }, { ready: false });
     return run.id;
   }
 
@@ -146,7 +148,10 @@ export class HistoryService {
       await manager.update(
         PomodoroParticipant,
         { runId, finishedAt: IsNull() },
-        { finishedAt: endedAt },
+        {
+          finishedAt: endedAt,
+          finishReason: status === FocusHistoryStatus.Completed ? 'completed' : 'cancelled',
+        },
       );
     }
     run.status =
@@ -164,6 +169,7 @@ export class HistoryService {
     roomId: string,
     userId: string,
     leftAt: Date,
+    reason: 'left_focus' | 'left_room' = 'left_room',
   ): Promise<void> {
     const timer = await manager.findOne(PomodoroSession, {
       where: { roomId },
@@ -211,6 +217,7 @@ export class HistoryService {
       .orIgnore()
       .execute();
     participant.finishedAt = resultTime;
+    participant.finishReason = timer.endsAt && timer.endsAt <= leftAt ? 'completed' : reason;
     await manager.save(participant);
   }
 
@@ -283,6 +290,38 @@ export class HistoryService {
       participant: !!participant,
       taskId: participant?.taskId ?? null,
       taskTitle: participant?.taskTitle ?? null,
+    };
+  }
+
+  async getSessionResults(userId: string, runId: string) {
+    const manager = this.history.manager;
+    const caller = await manager.findOneBy(PomodoroParticipant, { runId, userId });
+    if (!caller) throw historyErrors.notFound();
+    const run = await manager.findOneBy(PomodoroRun, { id: runId });
+    if (!run || run.status === PomodoroRunStatus.Running)
+      throw new ConflictException('Итоги появятся после окончания сессии');
+    const rows: Array<{
+      userId: string;
+      username: string;
+      taskTitle: string | null;
+      status: string;
+      focusedSeconds: number;
+      xpEarned: number;
+      coinsEarned: number;
+    }> = await manager.query(
+      `SELECT p.user_id AS "userId", u.username, p.task_title AS "taskTitle", h.status, p.finish_reason AS "finishReason",
+              h.focused_seconds AS "focusedSeconds", h.xp_earned AS "xpEarned", h.coins_earned AS "coinsEarned"
+       FROM pomodoro_participants p JOIN users u ON u.id = p.user_id
+       JOIN focus_history h ON h.user_id = p.user_id AND h.pomodoro_session_id = p.run_id
+       WHERE p.run_id = $1 ORDER BY u.username, p.user_id`,
+      [runId],
+    );
+    return {
+      runId,
+      status: run.status,
+      startedAt: run.startedAt,
+      endedAt: run.endedAt,
+      participants: rows,
     };
   }
 

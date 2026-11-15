@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { HistoryService } from '../src/history/history.service';
 import { PomodoroService } from '../src/pomodoro/pomodoro.service';
 import { createTestApp, RegisteredUser, registerUser, resetData } from './utils/test-app';
+import { readyRoom } from './utils/ready-room';
 
 describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
   let app: INestApplication;
@@ -30,6 +31,11 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     await app.close();
   });
 
+  async function startReady(userId: string, roomId: string) {
+    await readyRoom(ds, pomodoro, roomId);
+    return pomodoro.start(userId, roomId);
+  }
+
   async function roomFor(owner: RegisteredUser) {
     const response = await http().post('/rooms').set(as(owner)).send({ name: 'Study' }).expect(201);
     return response.body as { id: string; inviteCode: string };
@@ -54,7 +60,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const other = await registerUser(app, 'other');
     const first = await taskFor(owner, 'Original task');
     const room = await roomFor(owner);
-    const session = await pomodoro.start(owner.id, room.id);
+    const session = await startReady(owner.id, room.id);
     const path = `/history/sessions/${session.pomodoroSessionId}/my-task`;
     expect((await http().get(path).set(as(owner)).expect(200)).body).toEqual({
       participant: true,
@@ -162,9 +168,9 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const ownerTask = await taskFor(owner, 'Original title');
     const memberTask = await taskFor(member, 'Member task');
     const time = controlTime();
-    const running = await pomodoro.start(owner.id, room.id);
+    const running = await startReady(owner.id, room.id);
     expect(running.pomodoroSessionId).toEqual(expect.any(String));
-    const repeatedStart = await pomodoro.start(owner.id, room.id);
+    const repeatedStart = await startReady(owner.id, room.id);
     expect(repeatedStart.pomodoroSessionId).toBe(running.pomodoroSessionId);
     await http()
       .patch(`/tasks/${ownerTask.id}`)
@@ -214,7 +220,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app);
     const room = await roomFor(owner);
     const time = controlTime();
-    const first = await pomodoro.start(owner.id, room.id);
+    const first = await startReady(owner.id, room.id);
     time.at(62_500);
     await pomodoro.pause(owner.id, room.id);
     pomodoro.onModuleDestroy();
@@ -244,7 +250,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app);
     const room = await roomFor(owner);
     const time = controlTime();
-    await pomodoro.start(owner.id, room.id);
+    await startReady(owner.id, room.id);
     time.at(35_000);
     await pomodoro.pause(owner.id, room.id);
     time.at(635_000);
@@ -262,7 +268,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
       .set(as(member))
       .send({ inviteCode: room.inviteCode })
       .expect(200);
-    const run = await pomodoro.start(owner.id, room.id);
+    const run = await startReady(owner.id, room.id);
     const startedAt = new Date(Date.now() - 15_000);
     // Backdate the fixture instead of waiting 15 seconds; membership still brackets the whole run.
     await ds.query('UPDATE room_members SET joined_at = $1 WHERE room_id = $2 AND user_id = $3', [
@@ -298,7 +304,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app, 'owner');
     const late = await registerUser(app, 'late');
     const room = await roomFor(owner);
-    await pomodoro.start(owner.id, room.id);
+    await startReady(owner.id, room.id);
     await http()
       .post('/rooms/join')
       .set(as(late))
@@ -307,7 +313,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     await pomodoro.cancel(owner.id, room.id);
     expect((await http().get('/history').set(as(late)).expect(200)).body.total).toBe(0);
     await http().post('/rooms/leave').set(as(late)).expect(200);
-    const second = await pomodoro.start(owner.id, room.id);
+    const second = await startReady(owner.id, room.id);
     await pomodoro.pause(owner.id, room.id);
     await http().post('/rooms/leave').set(as(owner)).expect(200);
     const [run] = await ds.query('SELECT status FROM pomodoro_runs WHERE id = $1', [
@@ -326,7 +332,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app);
     const room = await roomFor(owner);
     const time = controlTime();
-    await pomodoro.start(owner.id, room.id);
+    await startReady(owner.id, room.id);
     time.at(30_000);
     const history = app.get(HistoryService);
     const original = history.finishFocus.bind(history);
@@ -351,7 +357,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app);
     const task = await taskFor(owner, 'Keep this title');
     const room = await roomFor(owner);
-    await pomodoro.start(owner.id, room.id);
+    await startReady(owner.id, room.id);
     const [deletion] = await Promise.all([
       http().delete(`/tasks/${task.id}`).set(as(owner)),
       pomodoro.cancel(owner.id, room.id),
@@ -365,10 +371,10 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const owner = await registerUser(app);
     const room = await roomFor(owner);
     const time = controlTime();
-    const cancelled = await pomodoro.start(owner.id, room.id);
+    const cancelled = await startReady(owner.id, room.id);
     time.at(60_000);
     await pomodoro.cancel(owner.id, room.id);
-    const completed = await pomodoro.start(owner.id, room.id);
+    const completed = await startReady(owner.id, room.id);
     expect(completed.pomodoroSessionId).not.toBe(cancelled.pomodoroSessionId);
     time.at(1_560_001);
     await pomodoro.getState(owner.id, room.id);
@@ -403,7 +409,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const stranger = await registerUser(app, 'stranger');
     const first = await roomFor(owner);
     const time = controlTime();
-    await pomodoro.start(owner.id, first.id);
+    await startReady(owner.id, first.id);
     await ds.query('UPDATE rooms SET name = $1 WHERE id = $2', ['Renamed', first.id]);
     time.at(30_000);
     await pomodoro.cancel(owner.id, first.id);
@@ -411,7 +417,7 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
     const second = await roomFor(owner);
     await ds.query('UPDATE rooms SET name = $1 WHERE id = $2', ['Garden', second.id]);
     time.at(40_000);
-    await pomodoro.start(owner.id, second.id);
+    await startReady(owner.id, second.id);
     time.at(60_000);
     await pomodoro.cancel(owner.id, second.id);
 
@@ -464,7 +470,9 @@ describe('Tasks, persisted Pomodoro runs and History (e2e)', () => {
   });
 
   it('reverts and reapplies both history migrations without removing the existing timer table', async () => {
-    // Rewards extends focus_history, so undo it before testing the older migrations.
+    // Undo shop, readiness and rewards before testing the older migrations.
+    await ds.undoLastMigration({ transaction: 'all' });
+    await ds.undoLastMigration({ transaction: 'all' });
     await ds.undoLastMigration({ transaction: 'all' });
     try {
       await ds.undoLastMigration({ transaction: 'all' });

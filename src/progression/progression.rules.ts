@@ -4,6 +4,8 @@ export const PROGRESSION_RULES = Object.freeze({
   focusCoins: 10,
   teamBonusPercent: 20,
   levelStepXp: 100,
+  xpBoosterPrice: 20,
+  xpBoosterPercent: 10,
 });
 
 /** Total XP needed to reach a level: 0, 100, 300, 600, 1000, ... */
@@ -34,6 +36,11 @@ export function focusReward(teamBonus: boolean) {
     xp: Math.floor(PROGRESSION_RULES.focusXp * multiplier),
     coins: Math.floor(PROGRESSION_RULES.focusCoins * multiplier),
   };
+}
+
+/** Booster applies after the team bonus; fractional XP rounds down. */
+export function boostedXp(baseXp: number): number {
+  return baseXp + Math.floor((baseXp * PROGRESSION_RULES.xpBoosterPercent) / 100);
 }
 
 export function activityDate(instant: Date, timezone: string): string {

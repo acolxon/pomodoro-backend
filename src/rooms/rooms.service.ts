@@ -8,6 +8,9 @@ import { generateInviteCode, isValidInviteCode, normalizeInviteCode } from './in
 import { isInviteCodeCollision, mapRoomDbError, roomErrors } from './rooms.errors';
 import { toRoomDto, toRoomMemberDto } from './rooms.mapper';
 import { HistoryService } from '../history/history.service';
+import { PomodoroSession, PomodoroPhase } from '../pomodoro/entities/pomodoro-session.entity';
+import { PomodoroParticipant } from '../history/entities/pomodoro-participant.entity';
+import { FocusHistory } from '../history/entities/focus-history.entity';
 
 /** Published only after the membership transaction commits. */
 export interface RoomChange {
@@ -235,7 +238,32 @@ export class RoomsService {
       relations: { user: { stats: true } },
       order: { joinedAt: 'ASC', id: 'ASC' },
     });
-    return members.map(toRoomMemberDto);
+    const timer = await manager.findOneBy(PomodoroSession, { roomId });
+    const participants = timer?.focusRunId
+      ? await manager.findBy(PomodoroParticipant, { runId: timer.focusRunId })
+      : [];
+    const histories =
+      timer?.focusRunId && timer.phase === PomodoroPhase.Break
+        ? await manager.findBy(FocusHistory, { pomodoroSessionId: timer.focusRunId })
+        : [];
+    return members.map((member) => {
+      const dto = toRoomMemberDto(member);
+      if (!timer?.focusRunId || !timer.phase) return dto;
+      const participant = participants.find((item) => item.userId === member.userId);
+      if (!participant) {
+        dto.sessionStatus = 'observer';
+        return dto;
+      }
+      dto.taskTitle = participant.taskTitle;
+      if (timer.phase === PomodoroPhase.Focus)
+        dto.sessionStatus = participant.finishedAt ? 'left_early' : 'focusing';
+      else
+        dto.sessionStatus =
+          histories.find((item) => item.userId === member.userId)?.status === 'completed'
+            ? 'resting'
+            : 'left_early';
+      return dto;
+    });
   }
 
   /** Передача прав владельца другому активному участнику. Доступна только владельцу. */

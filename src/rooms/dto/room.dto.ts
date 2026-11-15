@@ -25,6 +25,10 @@ export class RoomMemberDto {
   @ApiProperty({ example: 1 }) level!: number;
   @ApiProperty({ enum: RoomMemberRole, example: RoomMemberRole.Member }) role!: RoomMemberRole;
   @ApiProperty({ type: String, format: 'date-time' }) joinedAt!: Date;
+  @ApiProperty({ example: false }) ready!: boolean;
+  @ApiProperty({ example: 'waiting' }) sessionStatus!:
+    'waiting' | 'ready' | 'focusing' | 'left_early' | 'finished' | 'resting' | 'observer';
+  @ApiProperty({ type: String, nullable: true }) taskTitle!: string | null;
 }
 
 export class LeaveRoomResultDto {

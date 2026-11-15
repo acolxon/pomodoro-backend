@@ -10,4 +10,6 @@ export class PomodoroParticipant {
     string | null;
   @Column({ name: 'focused_milliseconds', type: 'int', default: 0 }) focusedMilliseconds!: number;
   @Column({ name: 'finished_at', type: 'timestamptz', nullable: true }) finishedAt!: Date | null;
+  @Column({ name: 'finish_reason', type: 'varchar', length: 24, nullable: true }) finishReason!:
+    'completed' | 'cancelled' | 'left_focus' | 'left_room' | null;
 }

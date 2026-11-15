@@ -7,6 +7,7 @@ import { PomodoroSession } from './entities/pomodoro-session.entity';
 import { PomodoroService } from './pomodoro.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { HistoryModule } from '../history/history.module';
+import { TasksModule } from '../tasks/tasks.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { HistoryModule } from '../history/history.module';
     UsersModule,
     RoomsModule,
     HistoryModule,
+    TasksModule,
   ],
   providers: [PomodoroService, RealtimeGateway],
   exports: [PomodoroService],

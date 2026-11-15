@@ -57,6 +57,9 @@ describe('rooms.mapper', () => {
       level: 4,
       role: RoomMemberRole.Member,
       joinedAt: now,
+      ready: false,
+      sessionStatus: 'waiting',
+      taskTitle: null,
     });
     expect(JSON.stringify(dto)).not.toContain('bob@example.com');
     expect(JSON.stringify(dto)).not.toContain('999');

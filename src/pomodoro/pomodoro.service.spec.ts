@@ -14,7 +14,12 @@ describe('Pomodoro lifecycle and history', () => {
   let manager: EntityManager;
   let dataSource: DataSource;
   let focusedMilliseconds: number;
-  let history: { beginFocus: jest.Mock; recordInterval: jest.Mock; finishFocus: jest.Mock };
+  let history: {
+    beginFocus: jest.Mock;
+    recordInterval: jest.Mock;
+    finishFocus: jest.Mock;
+    memberLeft: jest.Mock;
+  };
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -38,6 +43,7 @@ describe('Pomodoro lifecycle and history', () => {
         focusedMilliseconds += to.getTime() - from.getTime();
       }),
       finishFocus: jest.fn().mockResolvedValue(undefined),
+      memberLeft: jest.fn().mockResolvedValue(undefined),
     };
     manager = {
       findOne: jest.fn(async (entity: unknown) =>
@@ -128,6 +134,26 @@ describe('Pomodoro lifecycle and history', () => {
     await expect(service.start('member', 'room')).rejects.toThrow('Только владелец');
     expect(history.beginFocus).not.toHaveBeenCalled();
     expect((await service.getState('member', 'room')).status).toBe('idle');
+  });
+
+  it('lets a participant leave a running focus without resetting the shared timer', async () => {
+    await service.start('owner', 'room');
+    jest.setSystemTime(base.getTime() + 120_000);
+    const result = await service.leaveFocus('member', 'room');
+    expect(result).toMatchObject({ status: 'running', phase: 'focus', pomodoroSessionId: 'run-1' });
+    expect(history.memberLeft).toHaveBeenCalledWith(
+      manager,
+      'room',
+      'member',
+      new Date(base.getTime() + 120_000),
+      'left_focus',
+    );
+    expect(history.finishFocus).not.toHaveBeenCalled();
+  });
+
+  it('refuses readiness during a running focus', async () => {
+    await service.start('owner', 'room');
+    await expect(service.setReady('member', 'room', true)).rejects.toThrow(/перед началом/);
   });
 
   it('rejects a former member before accessing the timer or starting a run', async () => {

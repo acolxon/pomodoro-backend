@@ -1,4 +1,4 @@
-import { activityDate, focusReward, progressionForXp } from './progression.rules';
+import { activityDate, boostedXp, focusReward, progressionForXp } from './progression.rules';
 
 describe('Progression balance', () => {
   it.each([
@@ -28,6 +28,8 @@ describe('Progression balance', () => {
   it('awards base and team rewards with server rounding', () => {
     expect(focusReward(false)).toEqual({ xp: 25, coins: 10 });
     expect(focusReward(true)).toEqual({ xp: 30, coins: 12 });
+    expect(boostedXp(focusReward(false).xp)).toBe(27);
+    expect(boostedXp(focusReward(true).xp)).toBe(33);
   });
 
   it('uses the user timezone for activity days across midnight', () => {

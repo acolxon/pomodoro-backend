@@ -29,5 +29,8 @@ export function toRoomMemberDto(member: RoomMember): RoomMemberDto {
     level: member.user.stats?.level ?? 1,
     role: member.role,
     joinedAt: member.joinedAt,
+    ready: member.ready ?? false,
+    sessionStatus: member.ready ? 'ready' : 'waiting',
+    taskTitle: null,
   };
 }

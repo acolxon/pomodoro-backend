@@ -6,6 +6,7 @@ import { PomodoroService } from '../src/pomodoro/pomodoro.service';
 import { ProgressionService } from '../src/progression/progression.service';
 import { PomodoroRun } from '../src/history/entities/pomodoro-run.entity';
 import { createTestApp, RegisteredUser, registerUser, resetData } from './utils/test-app';
+import { readyRoom } from './utils/ready-room';
 
 describe('Focus rewards and levels (e2e)', () => {
   let app: INestApplication;
@@ -34,6 +35,11 @@ describe('Focus rewards and levels (e2e)', () => {
     if (app) await app.close();
   });
 
+  async function startReady(userId: string, roomId: string) {
+    await readyRoom(ds, timer, roomId);
+    return timer.start(userId, roomId);
+  }
+
   async function roomFor(owner: RegisteredUser) {
     return (await http().post('/rooms').set(as(owner)).send({ name: 'Reward garden' }).expect(201))
       .body as { id: string; inviteCode: string };
@@ -45,7 +51,7 @@ describe('Focus rewards and levels (e2e)', () => {
     return (await http().get('/auth/me').set(as(user)).expect(200)).body;
   }
   async function complete(owner: RegisteredUser, roomId: string) {
-    const started = await timer.start(owner.id, roomId);
+    const started = await startReady(owner.id, roomId);
     instant += 1_500_001;
     await Promise.all([timer.getState(owner.id, roomId), timer.getState(owner.id, roomId)]);
     return started.pomodoroSessionId!;
@@ -97,7 +103,7 @@ describe('Focus rewards and levels (e2e)', () => {
     const late = await registerUser(app, 'late');
     const room = await roomFor(owner);
     await join(member, room.inviteCode);
-    const started = await timer.start(owner.id, room.id);
+    const started = await startReady(owner.id, room.id);
     await join(late, room.inviteCode);
     instant += 1_500_001;
     await timer.getState(owner.id, room.id);
@@ -123,7 +129,7 @@ describe('Focus rewards and levels (e2e)', () => {
     const member = await registerUser(app, 'member');
     const room = await roomFor(owner);
     await join(member, room.inviteCode);
-    await timer.start(owner.id, room.id);
+    await startReady(owner.id, room.id);
     instant += 60_000;
     await http().post('/rooms/leave').set(as(member)).expect(200);
     await join(member, room.inviteCode);
@@ -140,10 +146,10 @@ describe('Focus rewards and levels (e2e)', () => {
   it('gives no reward for manual cancellation or pause expiry', async () => {
     const user = await registerUser(app);
     const room = await roomFor(user);
-    await timer.start(user.id, room.id);
+    await startReady(user.id, room.id);
     instant += 60_000;
     await timer.cancel(user.id, room.id);
-    await timer.start(user.id, room.id);
+    await startReady(user.id, room.id);
     instant += 60_000;
     await timer.pause(user.id, room.id);
     instant += 86_400_001;
@@ -155,7 +161,7 @@ describe('Focus rewards and levels (e2e)', () => {
   it('preserves a full reward if the last member leaves after the deadline before scheduler recovery', async () => {
     const user = await registerUser(app);
     const room = await roomFor(user);
-    const started = await timer.start(user.id, room.id);
+    const started = await startReady(user.id, room.id);
     const past = new Date(instant - 1_501_000);
     await ds.query('UPDATE pomodoro_runs SET started_at = $1 WHERE id = $2', [
       past,
@@ -176,7 +182,7 @@ describe('Focus rewards and levels (e2e)', () => {
   it('rolls back awards, stats, history and timer together on a downstream failure', async () => {
     const user = await registerUser(app);
     const room = await roomFor(user);
-    await timer.start(user.id, room.id);
+    await startReady(user.id, room.id);
     instant += 1_500_001;
     const history = app.get(HistoryService);
     const finish = history.finishFocus.bind(history);
@@ -216,9 +222,11 @@ describe('Focus rewards and levels (e2e)', () => {
   it('reverts and reapplies the rewards migration while preserving existing balances and history', async () => {
     const user = await registerUser(app);
     const room = await roomFor(user);
-    await timer.start(user.id, room.id);
+    await startReady(user.id, room.id);
     instant += 60_000;
     await timer.cancel(user.id, room.id);
+    await ds.undoLastMigration({ transaction: 'all' });
+    await ds.undoLastMigration({ transaction: 'all' });
     await ds.undoLastMigration({ transaction: 'all' });
     try {
       const [row] = await ds.query(

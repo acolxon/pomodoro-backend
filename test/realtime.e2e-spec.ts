@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 import { RealtimeGateway } from '../src/realtime/realtime.gateway';
 import { PomodoroService } from '../src/pomodoro/pomodoro.service';
 import { createTestApp, RegisteredUser, registerUser, resetData } from './utils/test-app';
+import { readyRoom } from './utils/ready-room';
 
 interface TestSocket {
   id?: string;
@@ -159,6 +160,7 @@ describe('Realtime room events and timer isolation (e2e)', () => {
       code: 'FORBIDDEN',
       message: expect.any(String),
     });
+    await readyRoom(ds, app.get(PomodoroService), room.id);
     expect(await command(b, 'pomodoro:start', { roomId: room.id })).toMatchObject({
       status: 'running',
       phase: 'focus',
@@ -187,6 +189,7 @@ describe('Realtime room events and timer isolation (e2e)', () => {
       memberSocket.disconnect();
     });
     await join(newcomer, room.inviteCode);
+    await readyRoom(ds, app.get(PomodoroService), room.id);
     const started = await command(ownerSocket, 'pomodoro:start', { roomId: room.id });
     await http()
       .patch(`/rooms/${room.id}/owner`)
@@ -244,6 +247,7 @@ describe('Realtime room events and timer isolation (e2e)', () => {
     await command(memberB, 'room:join', { roomId: room.id });
     await command(otherSocket, 'room:join', { roomId: second.id });
     const commonState = next(memberB, 'pomodoro:state');
+    await readyRoom(ds, app.get(PomodoroService), room.id);
     const started = await command(ownerSocket, 'pomodoro:start', { roomId: room.id });
     expect(await commonState).toMatchObject({ roomId: room.id, endsAt: started.endsAt });
     const secondBefore = await command(otherSocket, 'room:join', { roomId: second.id });

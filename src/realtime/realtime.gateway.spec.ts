@@ -23,6 +23,8 @@ describe('Realtime authorization and error contracts', () => {
     readState: jest.Mock;
     stopRoom: jest.Mock;
     start: jest.Mock;
+    setReady: jest.Mock;
+    leaveFocus: jest.Mock;
     setBroadcaster: jest.Mock;
   };
   let jwt: { verifyAsync: jest.Mock };
@@ -80,6 +82,8 @@ describe('Realtime authorization and error contracts', () => {
       readState: jest.fn().mockResolvedValue({ roomId, status: 'idle', serverTime: new Date() }),
       stopRoom: jest.fn(),
       start: jest.fn().mockResolvedValue({ roomId, status: 'running' }),
+      setReady: jest.fn().mockResolvedValue({ roomId, status: 'idle' }),
+      leaveFocus: jest.fn().mockResolvedValue({ roomId, status: 'running' }),
       setBroadcaster: jest.fn(),
     };
     jwt = { verifyAsync: jest.fn().mockResolvedValue({ sub: 'user-1' }) };
@@ -202,6 +206,22 @@ describe('Realtime authorization and error contracts', () => {
       code: 'NOT_IN_ROOM',
     });
     expect(pomodoro.start).not.toHaveBeenCalled();
+  });
+
+  it('validates readiness and requires room subscription for personal departure', async () => {
+    const connection = client();
+    await expect(
+      gateway.ready(socket(connection), { roomId, ready: 'yes' as unknown as boolean }),
+    ).rejects.toBeInstanceOf(WsException);
+    expect(await errorOf(gateway.leaveFocus(socket(connection), { roomId }))).toMatchObject({
+      code: 'NOT_IN_ROOM',
+    });
+    connection.rooms.add(`room:${roomId}`);
+    await gateway.ready(socket(connection), { roomId, ready: true });
+    expect(pomodoro.setReady).toHaveBeenCalledWith('user-1', roomId, true);
+    await gateway.leaveFocus(socket(connection), { roomId });
+    expect(pomodoro.leaveFocus).toHaveBeenCalledWith('user-1', roomId);
+    expect(broadcast).toHaveBeenCalledWith('room:updated', { roomId });
   });
 
   it('rejects malformed room IDs before consulting membership or running a command', async () => {

@@ -326,7 +326,8 @@ describe('Миграции и ограничения БД (e2e)', () => {
   });
 
   it('миграции можно откатить и применить заново', async () => {
-    // Последняя миграция — Rooms: после её отката остаются только таблицы Этапа 1
+    // Undo the later migrations before Rooms.
+    for (let i = 0; i < 6; i++) await ds.undoLastMigration({ transaction: 'each' });
     await ds.undoLastMigration({ transaction: 'each' });
     const afterRooms = await tableNames();
     expect(afterRooms).not.toContain('rooms');

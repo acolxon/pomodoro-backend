@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import {
   ConnectedSocket,
   MessageBody,
@@ -19,6 +19,7 @@ import { PomodoroStateDto } from '../pomodoro/dto/pomodoro-state.dto';
 import { AuthUser, JwtPayload } from '../auth/types/auth-user';
 import { toErrorBody } from '../common/filters/all-exceptions.filter';
 import { ErrorCode } from '../common/errors/error-codes';
+import { TasksService } from '../tasks/tasks.service';
 
 interface AuthenticatedSocket extends Socket {
   data: { user?: AuthUser };
@@ -38,9 +39,13 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     private readonly users: UsersService,
     private readonly rooms: RoomsService,
     private readonly pomodoro: PomodoroService,
+    @Optional() tasks?: TasksService,
   ) {
     this.pomodoro.setBroadcaster((roomId, state) => this.broadcastState(roomId, state));
     this.rooms.setChangeListener((change) => this.roomChanged(change));
+    tasks?.setReadinessListener((roomId) =>
+      this.server?.to(this.channel(roomId)).emit('room:updated', { roomId }),
+    );
   }
 
   async handleConnection(client: AuthenticatedSocket): Promise<void> {
@@ -135,6 +140,28 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     return this.runCommand(client, body, (userId, roomId) => this.pomodoro.cancel(userId, roomId));
   }
 
+  @SubscribeMessage('pomodoro:ready')
+  async ready(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() body: RoomPayload & { ready: boolean },
+  ) {
+    if (typeof body?.ready !== 'boolean')
+      throw new WsException({ code: ErrorCode.VALIDATION_ERROR, message: 'Укажите готовность' });
+    return this.runCommand(client, body, (userId, roomId) =>
+      this.pomodoro.setReady(userId, roomId, body.ready),
+    );
+  }
+
+  @SubscribeMessage('pomodoro:leave')
+  async leaveFocus(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() body: RoomPayload,
+  ) {
+    return this.runCommand(client, body, (userId, roomId) =>
+      this.pomodoro.leaveFocus(userId, roomId),
+    );
+  }
+
   private async runCommand(
     client: AuthenticatedSocket,
     body: RoomPayload,
@@ -190,6 +217,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   private broadcastState(roomId: string, state: PomodoroStateDto): void {
     this.server?.to(this.channel(roomId)).emit('pomodoro:state', state);
+    this.server?.to(this.channel(roomId)).emit('room:updated', { roomId });
   }
 
   private extractToken(client: Socket): string | null {

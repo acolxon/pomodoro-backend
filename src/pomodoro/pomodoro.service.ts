@@ -1,5 +1,6 @@
 import {
   ForbiddenException,
+  ConflictException,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -10,9 +11,12 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager, IsNull } from 'typeorm';
 import { FocusHistoryStatus } from '../history/entities/focus-history.entity';
 import { PomodoroRun } from '../history/entities/pomodoro-run.entity';
+import { PomodoroParticipant } from '../history/entities/pomodoro-participant.entity';
+import { Task, TaskStatus } from '../tasks/entities/task.entity';
 import { HistoryService } from '../history/history.service';
 import { RoomMember } from '../rooms/entities/room-member.entity';
 import { Room, RoomStatus } from '../rooms/entities/room.entity';
+import { getPgErrorInfo } from '../common/utils/pg-error';
 import { roomErrors } from '../rooms/rooms.errors';
 import { PomodoroPhase, PomodoroSession, PomodoroStatus } from './entities/pomodoro-session.entity';
 import { PomodoroStateDto } from './dto/pomodoro-state.dto';
@@ -87,6 +91,44 @@ export class PomodoroService implements OnModuleInit, OnModuleDestroy {
       this.beginPhase(row, PomodoroPhase.Focus, FOCUS_SECONDS, now);
       row.focusRunId = await this.history.beginFocus(manager, roomId, now, FOCUS_SECONDS);
       row.updatedBy = userId;
+    }).catch((error: unknown) => {
+      if (getPgErrorInfo(error).constraint === 'uq_participant_active_user')
+        throw new ConflictException('Один из участников уже находится в другой фокус-сессии');
+      throw error;
+    });
+  }
+
+  setReady(userId: string, roomId: string, ready: boolean): Promise<PomodoroStateDto> {
+    return this.mutate(roomId, userId, false, async (row, manager) => {
+      if (row.status !== PomodoroStatus.Idle)
+        throw new ConflictException('Готовность можно изменить перед началом фокуса');
+      if (
+        ready &&
+        !(await manager.findOne(Task, {
+          where: { userId, status: TaskStatus.InProgress },
+          lock: { mode: 'pessimistic_read' },
+        }))
+      )
+        throw new ConflictException('Сначала выберите активную задачу');
+      await manager.update(RoomMember, { roomId, userId, leftAt: IsNull() }, { ready });
+    });
+  }
+
+  leaveFocus(userId: string, roomId: string): Promise<PomodoroStateDto> {
+    return this.mutate(roomId, userId, false, async (row, manager, now) => {
+      if (
+        row.phase !== PomodoroPhase.Focus ||
+        !row.focusRunId ||
+        row.status === PomodoroStatus.Idle
+      )
+        throw new ConflictException('Активная фокус-сессия не найдена');
+      const participant = await manager.findOneBy(PomodoroParticipant, {
+        runId: row.focusRunId,
+        userId,
+        finishedAt: IsNull(),
+      });
+      if (!participant) throw new ConflictException('Вы не участвуете в этой сессии или уже вышли');
+      await this.history.memberLeft(manager, roomId, userId, now, 'left_focus');
     });
   }
 

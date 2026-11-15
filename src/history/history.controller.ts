@@ -33,6 +33,12 @@ export class HistoryController {
     return this.history.getSessionTask(user.id, id);
   }
 
+  @Get('sessions/:id/results')
+  @ApiOperation({ summary: 'Итоги завершённой сессии для её участников' })
+  getSessionResults(@CurrentUser() user: AuthUser, @Param('id', uuidPipe) id: string) {
+    return this.history.getSessionResults(user.id, id);
+  }
+
   @Get('rooms')
   @ApiOperation({ summary: 'Комнаты из личной истории для фильтрации' })
   @ApiOkResponse({ type: [HistoryRoomDto] })

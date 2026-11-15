@@ -65,6 +65,7 @@ describe('ProgressionService', () => {
       insert: jest.fn(async (_entity, receipt) => {
         receipts.push(receipt);
       }),
+      query: jest.fn().mockResolvedValue([[], 0]),
       save: jest.fn(async (value) => value),
       update: jest.fn(async () => ({})),
     } as unknown as EntityManager;
@@ -114,6 +115,38 @@ describe('ProgressionService', () => {
       UserStats,
       expect.objectContaining({ lock: { mode: 'pessimistic_write' } }),
     );
+  });
+
+  it('consumes one booster only for an eligible new reward and records the increased XP', async () => {
+    add('alice');
+    (manager.query as jest.Mock).mockResolvedValueOnce([[{ quantity: 0 }], 1]);
+    await service.awardFocus(manager, run);
+    expect(stats.get('alice')).toMatchObject({ xp: 27, coins: 10 });
+    expect(receipts[0]).toMatchObject({ xp: 27, coins: 10 });
+    expect(manager.update).toHaveBeenCalledWith(
+      FocusHistory,
+      expect.anything(),
+      expect.objectContaining({ xpEarned: 27 }),
+    );
+    await service.awardFocus(manager, run);
+    expect(manager.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not consume a booster for a cancelled or early participant', async () => {
+    add('alice', FocusHistoryStatus.Cancelled, 100_000);
+    await service.awardFocus(manager, run);
+    expect(manager.query).not.toHaveBeenCalled();
+  });
+
+  it('adds the booster after the team bonus without changing teammates or coins', async () => {
+    add('alice');
+    add('bob');
+    (manager.query as jest.Mock)
+      .mockResolvedValueOnce([[{ quantity: 0 }], 1])
+      .mockResolvedValueOnce([[], 0]);
+    await service.awardFocus(manager, run);
+    expect(stats.get('alice')).toMatchObject({ xp: 33, coins: 12 });
+    expect(stats.get('bob')).toMatchObject({ xp: 30, coins: 12 });
   });
 
   it('gives no reward for early departure or partial time and removes team bonus', async () => {
